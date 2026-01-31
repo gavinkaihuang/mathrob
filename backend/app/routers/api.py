@@ -14,6 +14,7 @@ class ProblemSchema(BaseModel):
     image_path: str
     latex_content: Optional[str] = None
     difficulty: Optional[int] = None
+    ai_analysis: Optional[dict] = None
     created_at: datetime
     
     class Config:
