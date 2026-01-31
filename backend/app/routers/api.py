@@ -3,18 +3,19 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Union
 from pydantic import BaseModel
 from ..database import get_db
-from ..models import Problem, KnowledgePoint, LearningRecord, SolutionAttempt
+from ..models import Problem, KnowledgePoint, LearningRecord, SolutionAttempt, User
 import os
 from datetime import datetime
 from ..services.ai_service import AIService
 
-UPLOAD_DIR = "backend/static"
+UPLOAD_DIR = "backend/uploads"
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 from datetime import datetime
 from ..services.ai_service import AIService
+from ..auth_deps import get_current_user
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_user)])
 ai_service = AIService()
 
 class ProblemSchema(BaseModel):
@@ -44,13 +45,15 @@ def get_problems(
     skip: int = 0, 
     limit: int = 20, 
     mastery: Optional[int] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     # Query problems with their learning records
     # We use outerjoin because we want problems even if they don't have records (unless filtering)
     query = db.query(Problem, LearningRecord).outerjoin(
-        LearningRecord, Problem.id == LearningRecord.problem_id
-    )
+        LearningRecord, 
+        (Problem.id == LearningRecord.problem_id) & (LearningRecord.user_id == current_user.id)
+    ).filter(Problem.user_id == current_user.id)
     
     if mastery is not None:
         query = query.filter(LearningRecord.mastery_level == mastery)
@@ -70,13 +73,17 @@ def get_problems(
     return problems
 
 @router.get("/problems/{problem_id}", response_model=ProblemSchema)
-def get_problem(problem_id: int, db: Session = Depends(get_db)):
-    problem = db.query(Problem).filter(Problem.id == problem_id).first()
+@router.get("/problems/{problem_id}", response_model=ProblemSchema)
+def get_problem(problem_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    problem = db.query(Problem).filter(Problem.id == problem_id, Problem.user_id == current_user.id).first()
     if not problem:
         raise HTTPException(status_code=404, detail="Problem not found")
     
     # Fetch learning record to get mastery level
-    record = db.query(LearningRecord).filter(LearningRecord.problem_id == problem_id).first()
+    record = db.query(LearningRecord).filter(
+        LearningRecord.problem_id == problem_id,
+        LearningRecord.user_id == current_user.id
+    ).first()
     if record:
         problem.current_mastery_level = record.mastery_level
         
@@ -95,16 +102,19 @@ class MasteryRequest(BaseModel):
     level: int # 1, 2, 3
 
 @router.post("/problems/{problem_id}/mastery")
-def update_mastery(problem_id: int, request: MasteryRequest, db: Session = Depends(get_db)):
+def update_mastery(problem_id: int, request: MasteryRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     # Check if problem exists
-    problem = db.query(Problem).filter(Problem.id == problem_id).first()
+    problem = db.query(Problem).filter(Problem.id == problem_id, Problem.user_id == current_user.id).first()
     if not problem:
         raise HTTPException(status_code=404, detail="Problem not found")
     
     # Find or create learning record
-    record = db.query(LearningRecord).filter(LearningRecord.problem_id == problem_id).first()
+    record = db.query(LearningRecord).filter(
+        LearningRecord.problem_id == problem_id,
+        LearningRecord.user_id == current_user.id
+    ).first()
     if not record:
-        record = LearningRecord(problem_id=problem_id)
+        record = LearningRecord(problem_id=problem_id, user_id=current_user.id)
         db.add(record)
     
     # SM-2 Algorithm Implementation
@@ -173,7 +183,8 @@ def update_mastery(problem_id: int, request: MasteryRequest, db: Session = Depen
     }
 
 @router.get("/daily-review", response_model=List[ProblemSchema])
-def get_daily_review_problems(db: Session = Depends(get_db)):
+@router.get("/daily-review", response_model=List[ProblemSchema])
+def get_daily_review_problems(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Get problems due for review today based on SM-2.
     """
@@ -186,6 +197,7 @@ def get_daily_review_problems(db: Session = Depends(get_db)):
     from sqlalchemy import or_
     
     records = db.query(LearningRecord).filter(
+        LearningRecord.user_id == current_user.id,
         or_(
             LearningRecord.review_date <= now,
             ((LearningRecord.status != 'correct') & (LearningRecord.review_date == None))
@@ -205,8 +217,8 @@ def get_daily_review_problems(db: Session = Depends(get_db)):
     return problems
 
 @router.post("/problems/{problem_id}/similar")
-async def generate_similar_practice(problem_id: int, db: Session = Depends(get_db)):
-    problem = db.query(Problem).filter(Problem.id == problem_id).first()
+async def generate_similar_practice(problem_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    problem = db.query(Problem).filter(Problem.id == problem_id, Problem.user_id == current_user.id).first()
     if not problem:
         raise HTTPException(status_code=404, detail="Problem not found")
     
@@ -230,9 +242,10 @@ async def generate_similar_practice(problem_id: int, db: Session = Depends(get_d
 async def submit_solution(
     problem_id: int, 
     file: UploadFile = File(...), 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
-    problem = db.query(Problem).filter(Problem.id == problem_id).first()
+    problem = db.query(Problem).filter(Problem.id == problem_id, Problem.user_id == current_user.id).first()
     if not problem:
         raise HTTPException(status_code=404, detail="Problem not found")
         
@@ -266,6 +279,7 @@ async def submit_solution(
     # Save Attempt
     attempt = SolutionAttempt(
         problem_id=problem_id,
+        user_id=current_user.id,
         image_path=safe_filename,
         feedback_json=feedback
     )
@@ -274,3 +288,40 @@ async def submit_solution(
     db.refresh(attempt)
     
     return attempt
+
+# --- Reports ---
+from ..services.report_service import ReportService
+from ..models import WeeklyReport
+from fastapi.responses import FileResponse
+
+@router.post("/reports/generate")
+def generate_weekly_report(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    service = ReportService(db)
+    try:
+        report = service.generate_weekly_report(user_id=current_user.id)
+        return report
+    except Exception as e:
+        print(f"Error generating report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/reports")
+def get_reports(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return db.query(WeeklyReport).filter(WeeklyReport.user_id == current_user.id).order_by(WeeklyReport.week_start.desc()).all()
+
+@router.get("/reports/{report_id}/download")
+def download_report(report_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    report = db.query(WeeklyReport).filter(WeeklyReport.id == report_id, WeeklyReport.user_id == current_user.id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+        
+    # Construct absolute path
+    # stored relative path: "reports/filename.pdf"
+    # static dir: backend/static
+    
+    base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../uploads"))
+    file_path = os.path.join(base_path, report.pdf_path) # report.pdf_path includes "reports/" prefix
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found on server")
+        
+    return FileResponse(file_path, filename=os.path.basename(file_path), media_type='application/pdf')

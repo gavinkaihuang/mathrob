@@ -22,12 +22,61 @@ class AIService:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             print("Warning: GEMINI_API_KEY not set")
-            self.model = None
         else:
             genai.configure(api_key=api_key)
-            model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
-            print(f"Using Gemini Model: {model_name}")
-            self.model = genai.GenerativeModel(model_name)
+
+    async def call_gemini_with_fallback(self, category: str, prompt: str, image_path: str = None) -> str:
+        """
+        Routes request to PRIMARY model for category, falls back to FALLBACK model on failure.
+        Categories: 'vision', 'teaching', 'utility'
+        """
+        # Resolve model names
+        primary_env = f"MODEL_{category.upper()}_PRIMARY"
+        fallback_env = f"MODEL_{category.upper()}_FALLBACK"
+        
+        primary_model = os.getenv(primary_env)
+        fallback_model = os.getenv(fallback_env)
+        
+        # Default safety net
+        if not primary_model:
+            primary_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
+            print(f"Warning: {primary_env} not set. Defaulting to {primary_model}")
+
+        candidates = [(primary_model, "Primary")]
+        if fallback_model and fallback_model != primary_model:
+            candidates.append((fallback_model, "Fallback"))
+
+        last_error = None
+        
+        for model_name, role in candidates:
+            try:
+                print(f"[{category.upper()}] Calling {role} model: {model_name}...")
+                model = genai.GenerativeModel(model_name)
+                
+                generation_config = {"response_mime_type": "application/json"}
+                
+                content = [prompt]
+                if image_path:
+                    # Note: PIL.Image.open is lazy, load() makes it eager.
+                    # Opening is fast, processing happens at send.
+                    # We open fresh for each attempt to avoid closed file issues if any.
+                    img = PIL.Image.open(image_path)
+                    content.append(img)
+                
+                # Use async generation
+                response = await model.generate_content_async(
+                    content,
+                    generation_config=generation_config
+                )
+                
+                return response.text
+                
+            except Exception as e:
+                print(f"[WARNING] 主模型 {model_name} ({role}) 调用失败，正在切换至备选模型 (if available)。Error: {e}")
+                last_error = e
+                # loop continues to fallback
+                
+        raise last_error or Exception("All models failed")
 
     def _load_reference_context(self) -> str:
         """
@@ -61,18 +110,9 @@ class AIService:
         return "REFERENCE CONTEXT (Shanghai Local Standards):\n" + "\n".join(context_parts)
 
 
-    async def analyze_image(self, image_path: str, retries: int = 3):
+    async def analyze_image(self, image_path: str):
         print(f"Analyzing image: {image_path}")
         
-        if not self.model:
-             return {
-                "latex_content": "\\text{AI Key Missing}",
-                "difficulty": 1,
-                "ai_analysis": {"error": "Please set GEMINI_API_KEY in .env"},
-                "knowledge_points": []
-            }
-        
-
         # Load reference context
         reference_context = self._load_reference_context()
         
@@ -107,66 +147,33 @@ class AIService:
         }}
         """
 
-        import time
+        try:
+            # Route to VISION models
+            text = await self.call_gemini_with_fallback('vision', prompt, image_path)
+            
+            # Clean up markdown
+            text = re.sub(r'```json\n|\n```', '', text).strip()
+            print(f"DEBUG: AI Raw Text: {text[:500]}...")
 
-        for attempt in range(retries):
-            try:
-                img = PIL.Image.open(image_path)
-                
-                # Use JSON mode for robustness
-                generation_config = {"response_mime_type": "application/json"}
-                
-                response = self.model.generate_content(
-                    [prompt, img], 
-                    generation_config=generation_config
-                )
-                text = response.text
-                
-                # Clean up markdown
-                text = re.sub(r'```json\n|\n```', '', text).strip()
-                
-                print(f"DEBUG: AI Raw Text: {text[:500]}...") # Print first 500 chars
+            # Parse JSON
+            data = json.loads(text)
+            
+            # Validate with Pydantic
+            validated_data = AIAnalysisResponse(**data)
+            
+            # Robustly fix LaTeX delimiters
+            validated_data.latex_content = self._fix_latex(validated_data.latex_content)
+            
+            return validated_data.dict()
 
-                # Parse JSON
-                data = json.loads(text)
-                print(f"DEBUG: Parsed JSON keys: {data.keys()}")
-                if "ai_analysis" in data:
-                    print(f"DEBUG: ai_analysis keys: {data['ai_analysis'].keys()}")
-                
-                # Validate with Pydantic
-                validated_data = AIAnalysisResponse(**data)
-                
-                # Robustly fix LaTeX delimiters
-                validated_data.latex_content = self._fix_latex(validated_data.latex_content)
-                
-                return validated_data.dict()
-
-            except (json.JSONDecodeError, ValidationError) as e:
-                print(f"Attempt {attempt + 1} failed (Parse/Validaton): {e}")
-                if attempt == retries - 1:
-                    return {
-                        "latex_content": "\\text{Analysis Failed}",
-                        "difficulty": 1,
-                        "ai_analysis": {"error": f"Failed after {retries} attempts: {str(e)}"},
-                        "knowledge_points": []
-                    }
-            except Exception as e:
-                print(f"Attempt {attempt + 1} failed (API/System): {e}")
-                # Check for rate limit or other retryable errors
-                if "429" in str(e) or "Quota" in str(e) or "Resource has been exhausted" in str(e):
-                    print("Rate limit hit. Waiting 5 seconds...")
-                    time.sleep(5)
-                else:
-                    # For other errors, maybe wait a bit less
-                    time.sleep(1)
-
-                if attempt == retries - 1:
-                    return {
-                        "latex_content": "\\text{Error}",
-                        "difficulty": 1,
-                        "ai_analysis": {"error": str(e)},
-                        "knowledge_points": []
-                    }
+        except Exception as e:
+            print(f"Analysis failed: {e}")
+            return {
+                "latex_content": "\\text{Analysis Failed}",
+                "difficulty": 1,
+                "ai_analysis": {"error": f"Failed: {str(e)}"},
+                "knowledge_points": []
+            }
 
 
     def _fix_latex(self, text: str) -> str:
@@ -184,10 +191,8 @@ class AIService:
     async def generate_similar_problems(self, original_latex: str, knowledge_points: List[str] = []) -> List[Dict[str, Any]]:
         """
         Generates 2 similar practice problems based on the original problem.
+        Uses UTILITY models.
         """
-        if not self.model:
-            return []
-
         kp_str = ", ".join(knowledge_points) if knowledge_points else "General Math"
         
         prompt = f"""
@@ -220,11 +225,8 @@ class AIService:
         """
         
         try:
-            generation_config = {"response_mime_type": "application/json"}
-            
-            # Note: generate_content for text-only input
-            response = self.model.generate_content(prompt, generation_config=generation_config)
-            text = response.text
+            # Route to UTILITY models
+            text = await self.call_gemini_with_fallback('utility', prompt)
             
             # Clean and parse
             text = re.sub(r'```json\n|\n```', '', text).strip()
@@ -235,16 +237,55 @@ class AIService:
                 for item in data:
                     if 'latex' in item:
                         item['latex'] = self._fix_latex(item['latex'])
-            image_part = self._load_image(solution_image_path)
-            model = self._get_model()
+            return data
             
-            response = await model.generate_content_async([prompt, image_part])
-            return self._parse_json_response(response.text)
+        except Exception as e:
+            print(f"Error generating similar problems: {e}")
+            return []
+
+    async def analyze_solution(self, problem_latex: str, standard_solution: str, solution_image_path: str):
+        """
+        Analyzes a student's handwritten solution against the problem and standard solution.
+        Uses TEACHING models (high reasoning capability).
+        """
+        prompt = f"""
+        Role: Expert Math Tutor.
+        Task: Check the student's solution image against the problem and standard solution.
+        
+        Problem (LaTeX):
+        {problem_latex}
+        
+        Standard Solution (Reference):
+        {standard_solution}
+        
+        Requirements:
+        1. Identify the student's logical steps.
+        2. Detect any calculation or logic errors.
+        3. Provide constructive suggestions.
+        4. Score the solution (0-100).
+        
+        Output strictly as JSON:
+        {{
+            "score": int,
+            "logic_gaps": ["gap1", "gap2"],
+            "calculation_errors": ["error1"],
+            "suggestions": "Markdown string with feedback"
+        }}
+        """
+        
+        try:
+            # Route to TEACHING models
+            text = await self.call_gemini_with_fallback('teaching', prompt, solution_image_path)
+            
+            text = re.sub(r'```json\n|\n```', '', text).strip()
+            data = json.loads(text)
+            return data
+            
         except Exception as e:
             print(f"Error analyzing solution: {e}")
             return {
                 "score": 0,
                 "logic_gaps": [],
                 "calculation_errors": ["Error processing solution analysis"],
-                "suggestions": "Please try again."
+                "suggestions": f"Analysis failed: {str(e)}"
             }

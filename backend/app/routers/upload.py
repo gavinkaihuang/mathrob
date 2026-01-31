@@ -55,6 +55,7 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
         ai_data["knowledge_points"] = analysis_result["knowledge_points"]
 
     new_problem = Problem(
+        user_id=current_user.id,
         image_path=file_path,
         latex_content=analysis_result.get("latex_content"),
         ai_analysis=ai_data,
