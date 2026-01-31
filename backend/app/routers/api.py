@@ -1,20 +1,21 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Union
 from pydantic import BaseModel
 from ..database import get_db
 from ..models import Problem, KnowledgePoint, LearningRecord
 from datetime import datetime
+from ..services.ai_service import AIService
 
 router = APIRouter()
+ai_service = AIService()
 
-# Pydantic Schemas
 class ProblemSchema(BaseModel):
     id: int
     image_path: str
     latex_content: Optional[str] = None
     difficulty: Optional[int] = None
-    ai_analysis: Optional[dict] = None
+    ai_analysis: Optional[Union[dict, str]] = None
     created_at: datetime
     current_mastery_level: Optional[int] = None
     
@@ -32,11 +33,33 @@ class KnowledgePointSchema(BaseModel):
 
 # Problem Endpoints
 @router.get("/problems", response_model=List[ProblemSchema])
-def get_problems(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
-    problems = db.query(Problem).order_by(Problem.created_at.desc()).offset(skip).limit(limit).all()
-    # Note: For list view, we might want to eaglery load records if performance matters, 
-    # but for now simplicity matches requirement. 
-    # To truly support 'status' in list view, logic would be needed here too.
+def get_problems(
+    skip: int = 0, 
+    limit: int = 20, 
+    mastery: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    # Query problems with their learning records
+    # We use outerjoin because we want problems even if they don't have records (unless filtering)
+    query = db.query(Problem, LearningRecord).outerjoin(
+        LearningRecord, Problem.id == LearningRecord.problem_id
+    )
+    
+    if mastery is not None:
+        query = query.filter(LearningRecord.mastery_level == mastery)
+        
+    # Sort by creation date
+    results = query.order_by(Problem.created_at.desc()).offset(skip).limit(limit).all()
+    
+    problems = []
+    for problem, record in results:
+        # Populate transient attribute for Pydantic
+        if record:
+            problem.current_mastery_level = record.mastery_level
+        else:
+            problem.current_mastery_level = None
+        problems.append(problem)
+        
     return problems
 
 @router.get("/problems/{problem_id}", response_model=ProblemSchema)
@@ -97,3 +120,25 @@ def get_daily_review_problems(db: Session = Depends(get_db)):
     ids = [r.problem_id for r in records]
     problems = db.query(Problem).filter(Problem.id.in_(ids)).all()
     return problems
+
+@router.post("/problems/{problem_id}/similar")
+async def generate_similar_practice(problem_id: int, db: Session = Depends(get_db)):
+    problem = db.query(Problem).filter(Problem.id == problem_id).first()
+    if not problem:
+        raise HTTPException(status_code=404, detail="Problem not found")
+    
+    # Extract info
+    latex = problem.latex_content or "N/A"
+    
+    # Handle knowledge points safely
+    kps = []
+    if problem.ai_analysis:
+        # Check if dict or str (since we support Union now)
+        if isinstance(problem.ai_analysis, dict):
+             kps = problem.ai_analysis.get("knowledge_points", [])
+        # If str, we ignore or try to parse, but let's just ignore for safety/speed
+    
+    # Call AI
+    similar_problems = await ai_service.generate_similar_problems(latex, kps)
+    
+    return similar_problems

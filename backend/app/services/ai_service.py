@@ -128,6 +128,7 @@ class AIService:
                         "knowledge_points": []
                     }
 
+
     def _fix_latex(self, text: str) -> str:
         """
         Post-procesing to ensure specific LaTeX commands are wrapped in $...$
@@ -137,7 +138,68 @@ class AIService:
 
         # Specific fix for the user's issue: \underline{\qquad}
         # A specialized regex that looks for \underline{...} NOT preceded by $
-        text = re.sub(r'(?<!\$)\\underline\{.*?\}', r'$\g<0>$', text)
+        text = re.sub(r'(?<!\$)\\\\underline\\{.*?\\}', r'$\g<0>$', text)
         return text
+
+    async def generate_similar_problems(self, original_latex: str, knowledge_points: List[str] = []) -> List[Dict[str, Any]]:
+        """
+        Generates 2 similar practice problems based on the original problem.
+        """
+        if not self.model:
+            return []
+
+        kp_str = ", ".join(knowledge_points) if knowledge_points else "General Math"
+        
+        prompt = f"""
+        Role: Math Teacher.
+        Task: Create 2 NEW math problems that are similar to the following problem, testing the same knowledge points ({kp_str}) and having the same difficulty level.
+        
+        Original Problem (LaTeX):
+        {original_latex}
+        
+        Requirements:
+        1. CHANGE the numbers and specific context, but keep the core logic/method same.
+        2. Output purely as a JSON list.
+        3. Double escape backslashes in LaTeX strings (e.g. \\\\frac).
+        
+        Output Schema (JSON List):
+        [
+            {{
+                "latex": "Problem 1 LaTeX string",
+                "answer": "Short answer string",
+                "solution": "Step-by-step solution string",
+                "id": 1
+            }},
+            {{
+                "latex": "Problem 2 LaTeX string",
+                "answer": "Short answer string",
+                "solution": "Step-by-step solution string",
+                "id": 2
+            }}
+        ]
+        """
+        
+        try:
+            generation_config = {"response_mime_type": "application/json"}
+            
+            # Note: generate_content for text-only input
+            response = self.model.generate_content(prompt, generation_config=generation_config)
+            text = response.text
+            
+            # Clean and parse
+            text = re.sub(r'```json\n|\n```', '', text).strip()
+            data = json.loads(text)
+            
+            if isinstance(data, list):
+                # Basic Post-processing to ensure LaTeX is valid
+                for item in data:
+                    if 'latex' in item:
+                        item['latex'] = self._fix_latex(item['latex'])
+                return data
+            return []
+            
+        except Exception as e:
+            print(f"Error generating similar problems: {e}")
+            return []
 
 
