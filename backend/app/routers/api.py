@@ -1,9 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import List, Optional, Union
 from pydantic import BaseModel
 from ..database import get_db
-from ..models import Problem, KnowledgePoint, LearningRecord
+from ..models import Problem, KnowledgePoint, LearningRecord, SolutionAttempt
+import os
+from datetime import datetime
+from ..services.ai_service import AIService
+
+UPLOAD_DIR = "backend/static"
+if not os.path.exists(UPLOAD_DIR):
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
 from datetime import datetime
 from ..services.ai_service import AIService
 
@@ -100,25 +107,101 @@ def update_mastery(problem_id: int, request: MasteryRequest, db: Session = Depen
         record = LearningRecord(problem_id=problem_id)
         db.add(record)
     
-    record.mastery_level = request.level
-    record.created_at = datetime.utcnow() # Update timestamp implies activity
+    # SM-2 Algorithm Implementation
+    # Mapping:
+    # Level 1 (Red) -> Quality 1 (Reset)
+    # Level 2 (Yellow) -> Quality 3 (Hard)
+    # Level 3 (Green) -> Quality 5 (Easy)
     
-    # Update status based on level
+    quality = 0
+    if request.level == 1:
+        quality = 1
+    elif request.level == 2:
+        quality = 3
+    elif request.level == 3:
+        quality = 5
+        
+    # Retrieve current values
+    ef = record.ease_factor or 2.5
+    reps = record.repetitions or 0
+    interval = record.interval or 0
+    
+    if quality < 3:
+        # Failed/Reset
+        reps = 0
+        interval = 1
+    else:
+        # Passed
+        if reps == 0:
+            interval = 1
+        elif reps == 1:
+            interval = 6
+        else:
+            interval = int(interval * ef)
+        
+        reps += 1
+        
+        # Update EF
+        ef = ef + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02))
+        if ef < 1.3:
+            ef = 1.3
+            
+    # Update record
+    record.ease_factor = round(ef, 2)
+    record.repetitions = reps
+    record.interval = interval
+    record.mastery_level = request.level
+    
+    # Set next review date
+    from datetime import timedelta
+    record.review_date = datetime.utcnow() + timedelta(days=interval)
+    record.created_at = datetime.utcnow() # Last activity time
+    
+    # Update legacy status field for compatibility
     if request.level == 3:
         record.status = "correct"
     else:
-        record.status = "wrong" # or pending, treating anything < 3 as needing review
+        record.status = "wrong"
         
     db.commit()
-    return {"message": "Mastery updated", "level": request.level, "status": record.status}
+    
+    return {
+        "message": "Mastery updated", 
+        "level": request.level, 
+        "next_review": record.review_date,
+        "days_until_next": interval
+    }
 
 @router.get("/daily-review", response_model=List[ProblemSchema])
 def get_daily_review_problems(db: Session = Depends(get_db)):
-    # Mock logic: Review problems that are wrong or pending
-    # In real logic, update based on Ebbinghaus curve (review_date <= today)
-    records = db.query(LearningRecord).filter(LearningRecord.status != 'correct').all()
+    """
+    Get problems due for review today based on SM-2.
+    """
+    now = datetime.utcnow()
+    # Find records where review_date <= now OR (status != 'correct' AND review_date IS NULL)
+    # This covers:
+    # 1. Scheduled reviews that are due
+    # 2. Problems marked wrong/pending that haven't been scheduled yet (treat as due immediately)
+    
+    from sqlalchemy import or_
+    
+    records = db.query(LearningRecord).filter(
+        or_(
+            LearningRecord.review_date <= now,
+            ((LearningRecord.status != 'correct') & (LearningRecord.review_date == None))
+        )
+    ).all()
+    
     ids = [r.problem_id for r in records]
     problems = db.query(Problem).filter(Problem.id.in_(ids)).all()
+    
+    # Populate mastery for display
+    for p in problems:
+        # Find corresponding record (inefficient but simple for small scale)
+        rec = next((r for r in records if r.problem_id == p.id), None)
+        if rec:
+            p.current_mastery_level = rec.mastery_level
+            
     return problems
 
 @router.post("/problems/{problem_id}/similar")
@@ -142,3 +225,52 @@ async def generate_similar_practice(problem_id: int, db: Session = Depends(get_d
     similar_problems = await ai_service.generate_similar_problems(latex, kps)
     
     return similar_problems
+
+@router.post("/problems/{problem_id}/submit_solution")
+async def submit_solution(
+    problem_id: int, 
+    file: UploadFile = File(...), 
+    db: Session = Depends(get_db)
+):
+    problem = db.query(Problem).filter(Problem.id == problem_id).first()
+    if not problem:
+        raise HTTPException(status_code=404, detail="Problem not found")
+        
+    # Save file
+    safe_filename = f"solution_{problem_id}_{int(datetime.utcnow().timestamp())}_{file.filename}"
+    file_location = os.path.join(UPLOAD_DIR, safe_filename)
+    
+    with open(file_location, "wb") as buffer:
+        content = await file.read()
+        buffer.write(content)
+        
+    # Prepare context for AI
+    problem_latex = problem.latex_content or "N/A"
+    standard_solution = "N/A"
+    
+    # Try to extract standard solution from ai_analysis
+    if problem.ai_analysis:
+        if isinstance(problem.ai_analysis, dict):
+            standard_solution = problem.ai_analysis.get("solution", "N/A")
+        elif isinstance(problem.ai_analysis, str):
+            # Fallback if string, maybe just pass the whole string
+            standard_solution = problem.ai_analysis
+            
+    # Call AI
+    try:
+        feedback = await ai_service.analyze_solution(problem_latex, standard_solution, file_location)
+    except Exception as e:
+        print(f"AI Analysis failed: {e}")
+        feedback = {"score": 0, "error": str(e)}
+        
+    # Save Attempt
+    attempt = SolutionAttempt(
+        problem_id=problem_id,
+        image_path=safe_filename,
+        feedback_json=feedback
+    )
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
+    
+    return attempt

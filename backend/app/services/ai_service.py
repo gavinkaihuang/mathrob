@@ -4,6 +4,7 @@ import PIL.Image
 from dotenv import load_dotenv
 import json
 import re
+import glob
 
 load_dotenv()
 
@@ -28,6 +29,38 @@ class AIService:
             print(f"Using Gemini Model: {model_name}")
             self.model = genai.GenerativeModel(model_name)
 
+    def _load_reference_context(self) -> str:
+        """
+        Loads text content from backend/reference_docs/ to inject into the prompt.
+        """
+        context_parts = []
+        # Calculate absolute path: current file is in backend/app/services/, so go up 3 levels to backend/
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        doc_dir = os.path.join(base_dir, "reference_docs")
+        
+        if not os.path.exists(doc_dir):
+            return ""
+
+        # Read .txt and .md files
+        files = []
+        for ext in ["*.txt", "*.md"]:
+            files.extend(glob.glob(os.path.join(doc_dir, ext)))
+            
+        for file_path in files:
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    filename = os.path.basename(file_path)
+                    content = f.read()
+                    context_parts.append(f"--- Document: {filename} ---\n{content}\n")
+            except Exception as e:
+                print(f"Error reading reference doc {file_path}: {e}")
+                
+        if not context_parts:
+            return ""
+            
+        return "REFERENCE CONTEXT (Shanghai Local Standards):\n" + "\n".join(context_parts)
+
+
     async def analyze_image(self, image_path: str, retries: int = 3):
         print(f"Analyzing image: {image_path}")
         
@@ -39,8 +72,15 @@ class AIService:
                 "knowledge_points": []
             }
         
-        prompt = r"""
+
+        # Load reference context
+        reference_context = self._load_reference_context()
+        
+        prompt = rf"""
         You are a math expert. Analyze this image.
+        
+        {reference_context}
+        
         1. Extract the math problem into LaTeX format.
         2. Provide a brief HINT or breakthrough point (max 2-3 sentences) in `thinking_process` (in Simplified Chinese).
         3. Provide the COMPLETE step-by-step solution in `solution` (in Simplified Chinese).
@@ -52,19 +92,19 @@ class AIService:
         Return strictly valid JSON matching this schema.
         IMPORTANT: 
         1. For any LaTeX content, you MUST double-escape all backslashes. (e.g. "\\frac" instead of "\frac")
-        2. You MUST enclose ALL mathematical expressions and LaTeX commands (including underlines \underline{}, spacing \qquad) in single dollar signs $. 
-           Example: "The answer is $\\underline{\\qquad}$." NOT "The answer is \\underline{\\qquad}."
+        2. You MUST enclose ALL mathematical expressions and LaTeX commands (including underlines \underline{{}}, spacing \qquad) in single dollar signs $. 
+           Example: "The answer is $\\underline{{\\qquad}}$." NOT "The answer is \\underline{{\\qquad}}."
 
-        {
+        {{
             "latex_content": "latex_string",
             "difficulty": int,
             "knowledge_points": ["知识点1", "知识点2"],
-            "ai_analysis": {
+            "ai_analysis": {{
                 "topic": ["主题"],
                 "solution": "markdown_string_with_latex (Full Solution)",
                 "thinking_process": "string (Hint/Breakthrough Point)"
-            }
-        }
+            }}
+        }}
         """
 
         import time
@@ -195,11 +235,16 @@ class AIService:
                 for item in data:
                     if 'latex' in item:
                         item['latex'] = self._fix_latex(item['latex'])
-                return data
-            return []
+            image_part = self._load_image(solution_image_path)
+            model = self._get_model()
             
+            response = await model.generate_content_async([prompt, image_part])
+            return self._parse_json_response(response.text)
         except Exception as e:
-            print(f"Error generating similar problems: {e}")
-            return []
-
-
+            print(f"Error analyzing solution: {e}")
+            return {
+                "score": 0,
+                "logic_gaps": [],
+                "calculation_errors": ["Error processing solution analysis"],
+                "suggestions": "Please try again."
+            }
