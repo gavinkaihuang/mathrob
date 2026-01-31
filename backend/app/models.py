@@ -48,6 +48,7 @@ class LearningRecord(Base):
     id = Column(Integer, primary_key=True, index=True)
     problem_id = Column(Integer, ForeignKey("problems.id"))
     status = Column(String, default="pending") # correct, wrong
+    mastery_level = Column(Integer, nullable=True) # 1: Won't, 2: Half, 3: Mastered
     review_date = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
