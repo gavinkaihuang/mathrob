@@ -50,11 +50,12 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=UPLOAD_DIR), name="static")
 
 
-from .routers import api, upload, auth, users
+from .routers import api, upload, auth, users, settings
 app.include_router(auth.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
 app.include_router(api.router, prefix="/api")
 app.include_router(upload.router, prefix="/api") # or just /upload if preferred, keeping consistency
+app.include_router(settings.router, prefix="/api")
 
 @app.get("/")
 def read_root():

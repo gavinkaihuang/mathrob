@@ -15,6 +15,7 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
     const [showHint, setShowHint] = useState(false);
     const [showSolution, setShowSolution] = useState(false);
     const [masteryLevel, setMasteryLevel] = useState<number | null>(null);
+    const [showErrorLog, setShowErrorLog] = useState(false);
 
     // Practice Mode State
 
@@ -112,6 +113,31 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
 
                         {/* Right: Analysis */}
                         <div className="space-y-6">
+                            {/* Error Banner */}
+                            {problem.ai_analysis && problem.ai_analysis.error && (
+                                <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-r-lg">
+                                    <div className="flex justify-between items-start">
+                                        <div>
+                                            <h3 className="text-red-800 font-medium flex items-center gap-2">
+                                                <span>⚠️</span> 分析失败 (Analysis Failed)
+                                            </h3>
+                                            <p className="text-sm text-red-600 mt-1">AI 引擎在处理此图片时遇到了问题。您可以重试，或查看详细日志报告给管理员。</p>
+                                        </div>
+                                        <button
+                                            onClick={() => setShowErrorLog(!showErrorLog)}
+                                            className="text-sm bg-red-100 text-red-700 hover:bg-red-200 px-3 py-1.5 rounded-md transition-colors"
+                                        >
+                                            {showErrorLog ? '隐藏日志 (Hide Log)' : '查看日志 (View Log)'}
+                                        </button>
+                                    </div>
+                                    {showErrorLog && (
+                                        <div className="mt-4 bg-red-950 text-red-200 p-3 rounded-md text-xs font-mono overflow-auto max-h-64 break-words">
+                                            {problem.ai_analysis.error}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
                             <div>
                                 <h2 className="font-semibold text-gray-700 mb-2">Recognized LaTeX</h2>
                                 <div className="p-4 bg-gray-50 rounded-lg text-lg overflow-x-auto">

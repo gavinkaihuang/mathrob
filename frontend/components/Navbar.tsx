@@ -18,6 +18,7 @@ export function Navbar() {
 
     if (isAdmin) {
         links.push({ href: '/users', label: '用户管理' });
+        links.push({ href: '/settings', label: '系统设置' });
     }
 
     if (!isAuthenticated) return null; // Don't show navbar if not logged in (e.g. login page)

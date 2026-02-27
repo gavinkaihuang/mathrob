@@ -14,7 +14,7 @@ interface User {
 }
 
 export default function UsersPage() {
-    const { isAdmin, isAuthenticated, loading: authLoading } = useAuth();
+    const { isAdmin, isAuthenticated } = useAuth();
     const router = useRouter();
     const [users, setUsers] = useState<User[]>([]);
     const [loading, setLoading] = useState(true);
@@ -30,14 +30,14 @@ export default function UsersPage() {
     });
 
     useEffect(() => {
-        if (!authLoading && !isAdmin) {
+        if (!isAdmin) {
             router.push('/');
             return;
         }
         if (isAdmin) {
             fetchUsers();
         }
-    }, [isAdmin, authLoading]);
+    }, [isAdmin]);
 
     const fetchUsers = async () => {
         try {
@@ -127,7 +127,7 @@ export default function UsersPage() {
         });
     };
 
-    if (authLoading || (isAuthenticated && !isAdmin && loading)) return <div>Loading...</div>;
+    if (isAuthenticated && !isAdmin && loading) return <div>Loading...</div>;
 
     return (
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
