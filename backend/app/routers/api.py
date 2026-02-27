@@ -417,6 +417,73 @@ def generate_weekly_report(db: Session = Depends(get_db), current_user: User = D
         print(f"Error generating report: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/reviews/today")
+async def get_today_reviews(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from datetime import datetime
+    from sqlalchemy import and_, or_
+    import random
+    
+    today = datetime.utcnow()
+    
+    # 1. Query problems due for review
+    # We join Problem with LearningRecord to find due items
+    due_records = db.query(LearningRecord).join(Problem).filter(
+        and_(
+            LearningRecord.user_id == current_user.id,
+            LearningRecord.review_date <= today
+        )
+    ).all()
+    
+    if not due_records:
+        return []
+
+    # 2. Extract problem data with rich context
+    raw_list = []
+    for rec in due_records:
+        p = rec.problem
+        item = {
+            "id": p.id,
+            "latex_content": p.latex_content,
+            "difficulty": p.difficulty,
+            "knowledge_path": p.knowledge_path,
+            "ai_analysis": p.ai_analysis,
+            "ai_model": p.ai_model,
+            "ease_factor": rec.ease_factor,
+            # If ease_factor is high (e.g. > 2.8), suggest a variant instead of the original
+            "trigger_variant": rec.ease_factor >= 2.8
+        }
+        raw_list.append(item)
+
+    # 3. Intelligent Shuffling & Grouping
+    # Group by knowledge_path
+    by_kp = {}
+    for item in raw_list:
+        kp = item["knowledge_path"] or "unknown"
+        if kp not in by_kp:
+            by_kp[kp] = []
+        by_kp[kp].append(item)
+    
+    # Interleave them to avoid same KP appearing > 3 times consecutively
+    final_selection = []
+    kps = list(by_kp.keys())
+    
+    while kps and len(final_selection) < 15:
+        # Pick a random KP that wasn't just used 3 times
+        # (Simplified: just shuffle the list of KPs and pull one)
+        random.shuffle(kps)
+        target_kp = kps[0]
+        
+        # Add up to 1-2 items from this KP then rotate
+        batch_size = min(len(by_kp[target_kp]), random.randint(1, 2))
+        for _ in range(batch_size):
+            if len(final_selection) < 15:
+                final_selection.append(by_kp[target_kp].pop(0))
+        
+        if not by_kp[target_kp]:
+            kps.remove(target_kp)
+
+    return final_selection
+
 @router.get("/reports")
 def get_reports(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return db.query(WeeklyReport).filter(WeeklyReport.user_id == current_user.id).order_by(WeeklyReport.week_start.desc()).all()

@@ -11,6 +11,7 @@ export function Navbar() {
 
     const links = [
         { href: '/', label: '首页' },
+        { href: '/review', label: '今日复习' },
         { href: '/history', label: '错题本' },
         { href: '/reports', label: '周报' },
     ];
