@@ -17,6 +17,9 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "MathRob AI",
   description: "Your AI Math Tutor",
+  icons: {
+    icon: '/logo.jpg',
+  },
 };
 
 export default function RootLayout({

@@ -10,6 +10,9 @@ load_dotenv()
 
 from pydantic import BaseModel, ValidationError
 from typing import List, Dict, Any, Optional
+import traceback
+from ..database import SessionLocal
+from ..models import SystemLog
 
 class AIAnalysisResponse(BaseModel):
     latex_content: str
@@ -18,6 +21,12 @@ class AIAnalysisResponse(BaseModel):
     knowledge_points: List[str]
     knowledge_path: Optional[str] = None
 
+class AIServiceException(Exception):
+    def __init__(self, message: str, error_type: str, retry_seconds: Optional[int] = None):
+        super().__init__(message)
+        self.error_type = error_type
+        self.retry_seconds = retry_seconds
+
 class AIService:
     def __init__(self):
         api_key = os.getenv("GEMINI_API_KEY")
@@ -25,6 +34,21 @@ class AIService:
             print("Warning: GEMINI_API_KEY not set")
         else:
             genai.configure(api_key=api_key)
+
+    def _log_system_error(self, category: str, message: str, details: Any = None):
+        try:
+            db = SessionLocal()
+            log_entry = SystemLog(
+                level="ERROR",
+                category=category,
+                message=message,
+                details=details
+            )
+            db.add(log_entry)
+            db.commit()
+            db.close()
+        except Exception as e:
+            print(f"Failed to write to system_logs: {e}")
 
     async def call_gemini_with_fallback(self, category: str, prompt: str, image_path: str = None) -> str:
         """
@@ -75,9 +99,32 @@ class AIService:
             except Exception as e:
                 print(f"[WARNING] 主模型 {model_name} ({role}) 调用失败，正在切换至备选模型 (if available)。Error: {e}")
                 last_error = e
-                # loop continues to fallback
-                
-        raise last_error or Exception("All models failed")
+        # If we got here, all models failed
+        error_msg = f"All models failed for {category}. Last error: {str(last_error)}"
+        
+        # Parse specific errors for the user UI
+        last_error_str = str(last_error).lower()
+        retry_seconds = None
+        
+        # Try to parse 'retry_delay { seconds: X }'
+        retry_match = re.search(r'retry_delay\s*\{\s*seconds:\s*(\d+)\s*\}', str(last_error))
+        if retry_match:
+            retry_seconds = int(retry_match.group(1))
+
+        if "429" in last_error_str or "resourceexhausted" in last_error_str:
+            self._log_system_error(category, f"Rate Limit Exceeded (429): {str(last_error)}", {"primary": primary_model, "fallback": fallback_model, "traceback": traceback.format_exc() if last_error else None})
+            raise AIServiceException("AI Model Rate Limit Exceeded", "rate_limit", retry_seconds)
+            
+        elif "401" in last_error_str or "403" in last_error_str or "permissiondenied" in last_error_str or "api_key_invalid" in last_error_str:
+            self._log_system_error(category, f"Authentication Error: {str(last_error)}", {"primary": primary_model, "fallback": fallback_model, "traceback": traceback.format_exc() if last_error else None})
+            raise AIServiceException("AI Model Authentication Failed", "auth_error")
+            
+        elif "503" in last_error_str or "504" in last_error_str or "serviceunavailable" in last_error_str or "deadlineexceeded" in last_error_str:
+            self._log_system_error(category, f"Service Unavailable: {str(last_error)}", {"primary": primary_model, "fallback": fallback_model, "traceback": traceback.format_exc() if last_error else None})
+            raise AIServiceException("AI Model Service Unavailable", "service_error")
+            
+        self._log_system_error(category, error_msg, {"primary": primary_model, "fallback": fallback_model, "traceback": traceback.format_exc() if last_error else None})
+        raise last_error or Exception(error_msg)
 
     def _load_reference_context(self) -> str:
         """
@@ -241,8 +288,11 @@ class AIService:
             result["ai_model"] = used_model
             return result
 
+        except AIServiceException as e:
+            raise e
         except Exception as e:
             print(f"Analysis failed: {e}")
+            self._log_system_error("vision", f"Vision Analysis Failed: {str(e)}", {"traceback": traceback.format_exc()})
             return {
                 "latex_content": "\\text{Analysis Failed}",
                 "difficulty": 1,
@@ -341,8 +391,11 @@ class AIService:
                 "ai_model": used_model
             }
             
+        except AIServiceException as e:
+            raise e
         except Exception as e:
             print(f"Error generating similar problems: {e}")
+            self._log_system_error("utility", f"Practice Generation Failed: {str(e)}", {"traceback": traceback.format_exc()})
             return {"problems": [], "error": str(e)}
 
     async def analyze_solution(self, problem_latex: str, standard_solution: str, solution_image_path: str):
@@ -383,8 +436,11 @@ class AIService:
             data = json.loads(text)
             return data
             
+        except AIServiceException as e:
+            raise e
         except Exception as e:
             print(f"Error analyzing solution: {e}")
+            self._log_system_error("teaching", f"Solution Analysis Failed: {str(e)}", {"traceback": traceback.format_exc()})
             return {
                 "score": 0,
                 "logic_gaps": [],

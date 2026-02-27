@@ -12,7 +12,7 @@ UPLOAD_DIR = "backend/uploads"
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 from datetime import datetime
-from ..services.ai_service import AIService
+from ..services.ai_service import AIService, AIServiceException
 from ..auth_deps import get_current_user
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
@@ -335,13 +335,20 @@ async def generate_similar_practice(problem_id: int, db: Session = Depends(get_d
     if problem.ai_analysis and isinstance(problem.ai_analysis, dict):
         kps = problem.ai_analysis.get("knowledge_points", [])
     
-    # Call AI with rich context
-    result = await ai_service.generate_similar_problems(
-        original_latex=latex, 
-        knowledge_points=kps, 
-        difficulty=difficulty,
-        knowledge_path_name=knowledge_path_name
-    )
+    try:
+        # Call AI with rich context
+        result = await ai_service.generate_similar_problems(
+            original_latex=latex, 
+            knowledge_points=kps, 
+            difficulty=difficulty,
+            knowledge_path_name=knowledge_path_name
+        )
+    except AIServiceException as e:
+        status_code = 429 if e.error_type == "rate_limit" else 401 if e.error_type == "auth_error" else 503
+        raise HTTPException(
+            status_code=status_code, 
+            detail={"message": e.args[0], "error_type": e.error_type, "retry_seconds": e.retry_seconds}
+        )
     
     # Extract problems from result
     similar_problems = result.get("problems", [])
@@ -425,6 +432,12 @@ async def submit_practice_solution(
     # Call AI Teaching Model to analyze the handwritten solution vs reference
     try:
         feedback = await ai_service.analyze_solution(problem_latex, standard_solution, file_location)
+    except AIServiceException as e:
+        status_code = 429 if e.error_type == "rate_limit" else 401 if e.error_type == "auth_error" else 503
+        raise HTTPException(
+            status_code=status_code, 
+            detail={"message": e.args[0], "error_type": e.error_type, "retry_seconds": e.retry_seconds}
+        )
     except Exception as e:
         print(f"AI Practice Analysis failed: {e}")
         feedback = {"score": 0, "error": str(e)}
@@ -466,6 +479,12 @@ async def submit_solution(
     # Call AI
     try:
         feedback = await ai_service.analyze_solution(problem_latex, standard_solution, file_location)
+    except AIServiceException as e:
+        status_code = 429 if e.error_type == "rate_limit" else 401 if e.error_type == "auth_error" else 503
+        raise HTTPException(
+            status_code=status_code, 
+            detail={"message": e.args[0], "error_type": e.error_type, "retry_seconds": e.retry_seconds}
+        )
     except Exception as e:
         print(f"AI Analysis failed: {e}")
         feedback = {"score": 0, "error": str(e)}

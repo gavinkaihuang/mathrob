@@ -14,7 +14,7 @@ interface ModelConfig {
 }
 
 export default function SettingsPage() {
-    const { isAuthenticated, isAdmin } = useAuth();
+    const { isAuthenticated } = useAuth();
     const router = useRouter();
     const [availableModels, setAvailableModels] = useState<string[]>([]);
     const [config, setConfig] = useState<ModelConfig>({
@@ -34,7 +34,7 @@ export default function SettingsPage() {
             router.push('/login');
             return;
         }
-        if (!isAdmin) {
+        if (!isAuthenticated) {
             router.push('/'); // Redirect non-admins
             return;
         }
@@ -62,7 +62,7 @@ export default function SettingsPage() {
         };
 
         fetchSettings();
-    }, [isAuthenticated, isAdmin, router]);
+    }, [isAuthenticated, router]);
 
     const handleSelectChange = (key: keyof ModelConfig, value: string) => {
         setConfig(prev => ({ ...prev, [key]: value }));
@@ -93,7 +93,7 @@ export default function SettingsPage() {
     };
 
     if (isLoading) return <div className="p-8 text-center text-gray-500">Loading settings...</div>;
-    if (!isAdmin) return null; // Fallback in case redirect takes a moment
+    if (!isAuthenticated) return null; // Fallback in case redirect takes a moment
 
     const categories = [
         {

@@ -7,7 +7,7 @@ from typing import Optional
 from ..database import get_db
 from ..models import Problem, DifficultyLevel, KnowledgeNode, User
 from ..auth_deps import get_current_user
-from ..services.ai_service import AIService
+from ..services.ai_service import AIService, AIServiceException
 from datetime import datetime
 
 router = APIRouter()
@@ -40,6 +40,12 @@ async def upload_file(
     try:
         # Note: analyze_image is async
         analysis_result = await ai_service.analyze_image(file_path)
+    except AIServiceException as e:
+        status_code = 429 if e.error_type == "rate_limit" else 401 if e.error_type == "auth_error" else 503
+        raise HTTPException(
+            status_code=status_code, 
+            detail={"message": e.args[0], "error_type": e.error_type, "retry_seconds": e.retry_seconds}
+        )
     except Exception as e:
         print(f"AI Analysis failed: {e}")
         analysis_result = {

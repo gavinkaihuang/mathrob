@@ -32,5 +32,22 @@ export async function fetchWithAuth(endpoint: string, options: RequestInit = {})
         }
     }
 
+    if (res.status === 429 || res.status === 401 || res.status === 503) {
+        if (typeof window !== 'undefined') {
+            try {
+                const clone = res.clone();
+                const data = await clone.json();
+                window.dispatchEvent(new CustomEvent('ai-system-error', {
+                    detail: { status: res.status, ...data.detail }
+                }));
+            } catch (e) {
+                // Ignore parsing errors, just send status
+                window.dispatchEvent(new CustomEvent('ai-system-error', {
+                    detail: { status: res.status }
+                }));
+            }
+        }
+    }
+
     return res;
 }

@@ -120,4 +120,13 @@ class WeeklyReport(Base):
     
     user = relationship("User", backref="weekly_reports")
 
+class SystemLog(Base):
+    __tablename__ = "system_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    level = Column(String(20), default="ERROR")
+    category = Column(String(50), nullable=True) # e.g. vision, teaching, utility
+    message = Column(Text, nullable=True)
+    details = Column(JSON, nullable=True)  # Store robust error tracebacks or input states
+    created_at = Column(DateTime, default=datetime.utcnow)
 
