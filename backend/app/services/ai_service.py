@@ -9,13 +9,14 @@ import glob
 load_dotenv()
 
 from pydantic import BaseModel, ValidationError
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 class AIAnalysisResponse(BaseModel):
     latex_content: str
     ai_analysis: Dict[str, Any]
     difficulty: int
     knowledge_points: List[str]
+    knowledge_path: Optional[str] = None
 
 class AIService:
     def __init__(self):
@@ -116,18 +117,73 @@ class AIService:
         # Load reference context
         reference_context = self._load_reference_context()
         
+        knowledge_mapping = {
+            "集合与逻辑": "SH_MATH.01",
+            "集合的概念与运算": "SH_MATH.01.01",
+            "命题、定理与逻辑联结词": "SH_MATH.01.02",
+            "充分条件与必要条件": "SH_MATH.01.03",
+            "不等式": "SH_MATH.02",
+            "不等式的性质与解法": "SH_MATH.02.01",
+            "基本不等式及其应用": "SH_MATH.02.02",
+            "函数": "SH_MATH.03",
+            "函数的概念、定义域与值域": "SH_MATH.03.01",
+            "函数的性质": "SH_MATH.03.02",
+            "幂、指、对函数": "SH_MATH.03.03",
+            "函数的零点与方程的解": "SH_MATH.03.04",
+            "三角函数": "SH_MATH.04",
+            "三角函数的概念": "SH_MATH.04.01",
+            "同角三角函数关系与诱导公式": "SH_MATH.04.02",
+            "三角恒等变换": "SH_MATH.04.03",
+            "三角函数的图像与性质": "SH_MATH.04.04",
+            "解三角形": "SH_MATH.04.05",
+            "数列与数学归纳法": "SH_MATH.05",
+            "数列的概念与通项公式": "SH_MATH.05.01",
+            "等差数列与等比数列": "SH_MATH.05.02",
+            "数列的求和方法": "SH_MATH.05.03",
+            "数列的极限与数学归纳法": "SH_MATH.05.04",
+            "平面向量与复数": "SH_MATH.06",
+            "平面向量的线性运算与坐标表示": "SH_MATH.06.01",
+            "平面向量的数量积及其应用": "SH_MATH.06.02",
+            "复数的概念与代数运算": "SH_MATH.06.03",
+            "解析几何": "SH_MATH.07",
+            "直线与方程": "SH_MATH.07.01",
+            "圆的方程与位置关系": "SH_MATH.07.02",
+            "椭圆的方程与性质": "SH_MATH.07.03",
+            "双曲线与抛物线的方程与性质": "SH_MATH.07.04",
+            "圆锥曲线综合问题": "SH_MATH.07.05",
+            "立体几何": "SH_MATH.08",
+            "空间几何体的表面积与体积": "SH_MATH.08.01",
+            "点、线、面的位置关系": "SH_MATH.08.02",
+            "空间向量的应用": "SH_MATH.08.03",
+            "概率与统计": "SH_MATH.09",
+            "排列、组合与二项式定理": "SH_MATH.09.01",
+            "古典概型与条件概率": "SH_MATH.09.02",
+            "随机变量及其分布": "SH_MATH.09.03",
+            "统计基础与正态分布": "SH_MATH.09.04",
+            "导数及其应用": "SH_MATH.10",
+            "导数的概念与运算": "SH_MATH.10.01",
+            "导数与函数单调性及极值": "SH_MATH.10.02",
+            "导数综合问题": "SH_MATH.10.03"
+        }
+        
+        mapping_str = "\n".join([f"- {k}: {v}" for k, v in knowledge_mapping.items()])
+
         prompt = rf"""
         You are a math expert. Analyze this image.
         
         {reference_context}
+        
+        SHANGHAI MATH KNOWLEDGE MAPPING:
+        {mapping_str}
         
         1. Extract the math problem into LaTeX format.
         2. Provide a brief HINT or breakthrough point (max 2-3 sentences) in `thinking_process` (in Simplified Chinese).
         3. Provide the COMPLETE step-by-step solution in `solution` (in Simplified Chinese).
            - USE "\n" to separate each step clearly.
            - Format: "Step 1: ...\nStep 2: ...\nAnswer: ..."
-        4. Identify key knowledge points.
+        4. Identify key knowledge points from the mapping provided above.
         5. Estimate difficulty (1-5).
+        6. REQUIRED: Select the most relevant `knowledge_path` from the mapping above. If no exact match, use the closest parent (e.g., 'SH_MATH.03' for a generic function problem).
         
         Return strictly valid JSON matching this schema.
         IMPORTANT: 
@@ -139,6 +195,7 @@ class AIService:
             "latex_content": "latex_string",
             "difficulty": int,
             "knowledge_points": ["知识点1", "知识点2"],
+            "knowledge_path": "SH_MATH.XX.XX",
             "ai_analysis": {{
                 "topic": ["主题"],
                 "solution": "markdown_string_with_latex (Full Solution)",

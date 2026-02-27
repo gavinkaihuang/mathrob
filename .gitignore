@@ -32,3 +32,4 @@ coverage/
 
 # Start of Backend
 backend/venv/
+backend/uploads/

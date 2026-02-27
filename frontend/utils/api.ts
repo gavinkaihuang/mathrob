@@ -28,10 +28,7 @@ export async function fetchWithAuth(endpoint: string, options: RequestInit = {})
         // But throwing usually helps centralised logic. 
         // For simplicity, just return res and let caller handle, or if we want global 401 handling, do it here.
         if (typeof window !== 'undefined') {
-            // Let the component handle it or Context handle it?
-            // Since we don't have access to router here, direct window location change is a bit harsh but effective for 401.
-            // But let's leave it to the app logic for now or Context update.
-            pass;
+            // Future: Handle redirect
         }
     }
 

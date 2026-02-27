@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Upload, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { fetchWithAuth } from '@/utils/api';
 
 interface FileUploadProps {
     onUploadSuccess?: (id: number) => void;
@@ -22,7 +23,7 @@ export function FileUpload({ onUploadSuccess }: FileUploadProps) {
         formData.append('file', file);
 
         try {
-            const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/upload`, {
+            const response = await fetchWithAuth(`/api/upload`, {
                 method: 'POST',
                 body: formData,
             });

@@ -46,3 +46,8 @@ Frontend running at: http://localhost:3000
 - **Auto-Scan**: Drops images into `scan_data/` to automatically process them.
 - **AI Analysis**: Extracts LaTeX and difficulty from images.
 - **Review**: Auto-generated daily review sets.
+
+
+
+# Startup Command
+source backend/venv/bin/activate && uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000

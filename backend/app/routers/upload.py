@@ -5,7 +5,8 @@ import os
 import uuid
 from typing import Optional
 from ..database import get_db
-from ..models import Problem, DifficultyLevel
+from ..models import Problem, DifficultyLevel, KnowledgeNode, User
+from ..auth_deps import get_current_user
 from ..services.ai_service import AIService
 from datetime import datetime
 
@@ -13,16 +14,16 @@ router = APIRouter()
 ai_service = AIService()
 
 UPLOAD_DIR = "uploads"
-# Ensure absolute path for robustness or relative to running location
-# For now, relative to where uvicorn runs is safer if consistent
-# But let's verify if 'uploads' exists in root or backend/uploads.
-# We created backend/uploads manually.
 SCAN_DATA_DIR = "./backend/uploads"
 if not os.path.exists(SCAN_DATA_DIR):
     os.makedirs(SCAN_DATA_DIR, exist_ok=True)
 
 @router.post("/upload")
-async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_file(
+    file: UploadFile = File(...), 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     # 1. Generate unique filename
     file_ext = file.filename.split(".")[-1] if "." in file.filename else "jpg"
     unique_filename = f"{uuid.uuid4()}.{file_ext}"
@@ -45,11 +46,21 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
             "latex_content": "\\text{Analysis Failed}",
             "ai_analysis": {"error": str(e)},
             "difficulty": 1,
-            "knowledge_points": []
+            "knowledge_points": [],
+            "knowledge_path": None
         }
-
-    # 4. Save to Database
-    # Merge knowledge_points into ai_analysis since we don't have a dedicated column yet
+ 
+    # 4. Extract and Validate Knowledge Path
+    kp_path = analysis_result.get("knowledge_path")
+    if kp_path:
+        # Verify the path exists in knowledge_nodes
+        exists = db.query(KnowledgeNode).filter(KnowledgeNode.path == kp_path).first()
+        if not exists:
+            print(f"Warning: AI returned non-existent knowledge path: {kp_path}")
+            # Optional: find closest parent or set to None
+            # For now, let's just keep it if it's a valid format, or set to null if preferred.
+    
+    # 5. Save to Database
     ai_data = analysis_result.get("ai_analysis", {})
     if "knowledge_points" in analysis_result:
         ai_data["knowledge_points"] = analysis_result["knowledge_points"]
@@ -60,6 +71,7 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
         latex_content=analysis_result.get("latex_content"),
         ai_analysis=ai_data,
         difficulty=analysis_result.get("difficulty", 1),
+        knowledge_path=kp_path,
         created_at=datetime.utcnow()
     )
     
@@ -67,4 +79,4 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
     db.commit()
     db.refresh(new_problem)
     
-    return {"id": new_problem.id, "message": "File processed successfully"}
+    return {"id": new_problem.id, "message": "File processed successfully", "knowledge_path": kp_path}

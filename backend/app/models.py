@@ -24,6 +24,13 @@ class User(Base):
     is_admin = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class KnowledgeNode(Base):
+    __tablename__ = "knowledge_nodes"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    path = Column(String, nullable=False, index=True) # ltree is stored as string in SQLAlchemy usually unless using geoalchemy/specific extensions
+
 class Problem(Base):
     __tablename__ = "problems"
 
@@ -33,6 +40,7 @@ class Problem(Base):
     latex_content = Column(Text, nullable=True)
     ai_analysis = Column(JSON, nullable=True)
     difficulty = Column(Integer, nullable=True) # 1-5 scale or similar
+    knowledge_path = Column(String, nullable=True, index=True) 
     created_at = Column(DateTime, default=datetime.utcnow)
     
     user = relationship("User", backref="problems")
