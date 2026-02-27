@@ -226,8 +226,9 @@ class AIService:
                     # This is tricky without a proper parser, but a common fix for LaTeX JSON:
                     # Note: We only do this if everything else fails.
                     escaped_text = text.replace('\\', '\\\\')
-                    # But don't double escape already escaped ones (very naive but can help)
-                    escaped_text = re.sub(r'\\\\{2,}', r'\\\\', escaped_text)
+                    escaped_text = escaped_text.replace('\\\\"', '\\"')
+                    escaped_text = escaped_text.replace('\\\\n', '\\n')
+                    escaped_text = escaped_text.replace('\\\\t', '\\t')
                     data = json.loads(escaped_text, strict=False)
             
             # Validate with Pydantic
@@ -317,8 +318,16 @@ class AIService:
             
             try:
                 data = json.loads(text)
-            except json.JSONDecodeError:
-                data = json.loads(text, strict=False)
+            except json.JSONDecodeError as je:
+                print(f"Standard JSON parse failed, trying robust mode: {je}")
+                try:
+                    data = json.loads(text, strict=False)
+                except Exception as e2:
+                    escaped_text = text.replace('\\', '\\\\')
+                    escaped_text = escaped_text.replace('\\\\"', '\\"')
+                    escaped_text = escaped_text.replace('\\\\n', '\\n')
+                    escaped_text = escaped_text.replace('\\\\t', '\\t')
+                    data = json.loads(escaped_text, strict=False)
             
             problems = data.get("problems", [])
             

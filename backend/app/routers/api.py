@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Union
 from pydantic import BaseModel
 from ..database import get_db
-from ..models import Problem, KnowledgePoint, LearningRecord, SolutionAttempt, User
+from ..models import Problem, KnowledgePoint, LearningRecord, SolutionAttempt, User, PracticeProblem
 import os
 from datetime import datetime
 from ..services.ai_service import AIService
@@ -346,10 +346,91 @@ async def generate_similar_practice(problem_id: int, db: Session = Depends(get_d
     # Extract problems from result
     similar_problems = result.get("problems", [])
     
-    # Note: For now, we return these for the user to practice. 
-    # Persisting them as separate Problem records can be done if the user later wants to "Add to Review".
+    saved_problems = []
+    for sp in similar_problems:
+        new_prob = PracticeProblem(
+            user_id=current_user.id,
+            latex_content=sp.get("latex", ""),
+            difficulty=difficulty,
+            knowledge_path=problem.knowledge_path,
+            ai_model=result.get("ai_model", "Utility Model"),
+            source_problem_id=problem.id,
+            ai_analysis={
+                "topic": ["Generated Practice"],
+                "solution": sp.get("solution", ""),
+                "thinking_process": sp.get("thinking_process", ""),
+                "answer": sp.get("answer", ""),
+                "knowledge_points": kps
+            }
+        )
+        db.add(new_prob)
+        saved_problems.append(new_prob)
+        
+    db.commit()
+    for sp in saved_problems:
+        db.refresh(sp)
+        
+    # We return the schemas so frontend receives the newly generated DB IDs.
+    return saved_problems
+
+@router.get("/problems/{problem_id}/similar")
+def get_similar_practice(problem_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Fetches previously generated practice problems linked to a specific source problem."""
+    # Ensure source problem is owned by user (or at least the children are)
+    practice_problems = db.query(PracticeProblem).filter(
+        PracticeProblem.source_problem_id == problem_id,
+        PracticeProblem.user_id == current_user.id
+    ).order_by(PracticeProblem.created_at.asc()).all()
     
-    return similar_problems
+    # We can return them directly since their structure maps well to the frontend expectations 
+    return practice_problems
+
+@router.post("/practice-problems/{problem_id}/submit_solution")
+async def submit_practice_solution(
+    problem_id: int, 
+    file: UploadFile = File(...), 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    practice = db.query(PracticeProblem).filter(
+        PracticeProblem.id == problem_id, 
+        PracticeProblem.user_id == current_user.id
+    ).first()
+    
+    if not practice:
+        raise HTTPException(status_code=404, detail="Practice problem not found")
+        
+    # Save file
+    safe_filename = f"practice_{problem_id}_{int(datetime.utcnow().timestamp())}_{file.filename}"
+    file_location = os.path.join(UPLOAD_DIR, safe_filename)
+    
+    with open(file_location, "wb") as buffer:
+        content = await file.read()
+        buffer.write(content)
+        
+    # Extract AI reference answer
+    problem_latex = practice.latex_content or "N/A"
+    standard_solution = "N/A"
+    
+    if practice.ai_analysis:
+        if isinstance(practice.ai_analysis, dict):
+            # The structure we injected during generation
+            standard_solution = practice.ai_analysis.get("solution", "N/A")
+            answer = practice.ai_analysis.get("answer")
+            if answer:
+                standard_solution += f"\n\nFinal Answer: {answer}"
+        elif isinstance(practice.ai_analysis, str):
+            standard_solution = practice.ai_analysis
+            
+    # Call AI Teaching Model to analyze the handwritten solution vs reference
+    try:
+        feedback = await ai_service.analyze_solution(problem_latex, standard_solution, file_location)
+    except Exception as e:
+        print(f"AI Practice Analysis failed: {e}")
+        feedback = {"score": 0, "error": str(e)}
+        
+    # Return directly, no need to clutter DB with solution attempts for practice
+    return {"feedback_json": feedback}
 
 @router.post("/problems/{problem_id}/submit_solution")
 async def submit_solution(

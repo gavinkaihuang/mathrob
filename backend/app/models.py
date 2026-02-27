@@ -48,6 +48,23 @@ class Problem(Base):
     user = relationship("User", backref="problems")
     learning_records = relationship("LearningRecord", back_populates="problem")
     solution_attempts = relationship("SolutionAttempt", back_populates="problem")
+    practice_problems = relationship("PracticeProblem", back_populates="source_problem")
+
+class PracticeProblem(Base):
+    __tablename__ = "practice_problems"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    source_problem_id = Column(Integer, ForeignKey("problems.id"), nullable=True)
+    latex_content = Column(Text, nullable=True)
+    difficulty = Column(Integer, nullable=True)
+    knowledge_path = Column(String, nullable=True, index=True) 
+    ai_model = Column(String, nullable=True)
+    ai_analysis = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    user = relationship("User", backref="practice_problems")
+    source_problem = relationship("Problem", back_populates="practice_problems")
 
 class KnowledgePoint(Base):
     __tablename__ = "knowledge_points"

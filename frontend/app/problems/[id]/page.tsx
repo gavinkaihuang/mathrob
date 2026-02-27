@@ -22,8 +22,12 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
     const [practiceProblems, setPracticeProblems] = useState<any[]>([]);
     const [generatingPractice, setGeneratingPractice] = useState(false);
     const [isReanalyzing, setIsReanalyzing] = useState(false);
-    const [practiceAnswers, setPracticeAnswers] = useState<{ [key: number]: string }>({});
     const [showPracticeSolutions, setShowPracticeSolutions] = useState<{ [key: number]: boolean }>({});
+
+    // Practice Solution Grading State
+    const [practiceFiles, setPracticeFiles] = useState<{ [key: number]: File | null }>({});
+    const [isAnalyzingPractice, setIsAnalyzingPractice] = useState<{ [key: number]: boolean }>({});
+    const [practiceAnalysisResults, setPracticeAnalysisResults] = useState<{ [key: number]: any }>({});
 
     // Solution Analysis State
     const [solutionFile, setSolutionFile] = useState<File | null>(null);
@@ -47,7 +51,21 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
                 setLoading(false);
             }
         }
+
+        async function fetchPracticeProblems() {
+            try {
+                const res = await fetchWithAuth(`/api/problems/${id}/similar`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setPracticeProblems(data);
+                }
+            } catch (error) {
+                console.error(error);
+            }
+        }
+
         fetchProblem();
+        fetchPracticeProblems();
     }, [id]);
 
     if (loading) {
@@ -72,7 +90,14 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
 
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
                     <div className="p-6 border-b border-gray-100 flex justify-between items-center">
-                        <h1 className="text-2xl font-bold text-gray-900">Problem Analysis #{problem.id}</h1>
+                        <div className="flex items-center gap-3">
+                            <h1 className="text-2xl font-bold text-gray-900">Problem Analysis #{problem.id}</h1>
+                            {problem.ai_model && (
+                                <span className="px-2.5 py-1 text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-100 rounded-full flex items-center gap-1 shadow-sm">
+                                    <span className="text-[10px]">🤖</span> {problem.ai_model}
+                                </span>
+                            )}
+                        </div>
                         <button
                             onClick={handleReanalyze}
                             disabled={isReanalyzing}
@@ -149,14 +174,15 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
                             <div className="space-y-2">
                                 <div className="flex justify-between items-center">
                                     <h2 className="font-semibold text-gray-700">Hint & Analysis</h2>
-                                    {!showHint && (
-                                        <button
-                                            onClick={() => setShowHint(true)}
-                                            className="px-4 py-2 bg-yellow-100 text-yellow-700 rounded-lg hover:bg-yellow-200 transition-colors text-sm font-medium"
-                                        >
-                                            💡 获取思路提示 (Get Hint)
-                                        </button>
-                                    )}
+                                    <button
+                                        onClick={() => setShowHint(!showHint)}
+                                        className={`px-4 py-2 rounded-lg transition-colors text-sm font-medium ${!showHint
+                                            ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200'
+                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                            }`}
+                                    >
+                                        {!showHint ? '💡 获取思路提示 (Get Hint)' : '🙈 隐藏思路提示 (Hide Hint)'}
+                                    </button>
                                 </div>
                                 {showHint && (
                                     <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-100 animate-in fade-in slide-in-from-top-2 duration-300">
@@ -172,14 +198,15 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
                             <div className="space-y-2">
                                 <div className="flex justify-between items-center">
                                     <h2 className="font-semibold text-gray-700">Detailed Solution</h2>
-                                    {!showSolution && (
-                                        <button
-                                            onClick={() => setShowSolution(true)}
-                                            className="px-4 py-2 bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200 transition-colors text-sm font-medium"
-                                        >
-                                            📝 查看详细过程 (View Solution)
-                                        </button>
-                                    )}
+                                    <button
+                                        onClick={() => setShowSolution(!showSolution)}
+                                        className={`px-4 py-2 rounded-lg transition-colors text-sm font-medium ${!showSolution
+                                            ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                            }`}
+                                    >
+                                        {!showSolution ? '📝 查看详细过程 (View Solution)' : '🙈 隐藏详细过程 (Hide Solution)'}
+                                    </button>
                                 </div>
                                 {showSolution && (
                                     <div className="p-4 bg-blue-50 rounded-lg border border-blue-100 animate-in fade-in slide-in-from-top-2 duration-300">
@@ -382,58 +409,120 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
 
                 {practiceProblems.length > 0 && (
                     <div className="grid md:grid-cols-2 gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                        {practiceProblems.map((p, idx) => (
-                            <div key={idx} className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm flex flex-col">
-                                <div className="flex justify-between mb-3">
-                                    <span className="text-xs font-bold text-indigo-500 uppercase tracking-wider">Practice #{idx + 1}</span>
-                                </div>
+                        {practiceProblems.map((p, idx) => {
+                            // Extract ai_analysis safely handling if it's stringified
+                            let aiData = p.ai_analysis || {};
+                            if (typeof aiData === 'string') {
+                                try { aiData = JSON.parse(aiData); } catch (e) { }
+                            }
 
-                                {/* Problem Content */}
-                                <div className="mb-4 text-gray-800 flex-grow">
-                                    <LatexRenderer content={p.latex} block />
-                                </div>
-
-                                {/* Input Area */}
-                                <div className="space-y-3 mt-4">
-                                    <textarea
-                                        placeholder="Write your answer here..."
-                                        className="w-full p-3 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 outline-none transition-all"
-                                        rows={3}
-                                        value={practiceAnswers[idx] || ''}
-                                        onChange={(e) => setPracticeAnswers({ ...practiceAnswers, [idx]: e.target.value })}
-                                    />
-
-                                    <div className="flex justify-between items-center">
-                                        <div className="flex gap-2">
-                                            <button className="px-3 py-1.5 bg-gray-100 text-gray-600 rounded-md text-xs font-medium hover:bg-gray-200">
-                                                📸 Photo
-                                            </button>
-                                            <button
-                                                onClick={() => setShowPracticeSolutions({ ...showPracticeSolutions, [idx]: !showPracticeSolutions[idx] })}
-                                                className="px-3 py-1.5 text-indigo-600 hover:bg-indigo-50 rounded-md text-xs font-medium transition-colors"
-                                            >
-                                                {showPracticeSolutions[idx] ? 'Hide' : '👁 Solution'}
-                                            </button>
-                                        </div>
-                                        <button className="px-4 py-1.5 bg-gray-900 text-white rounded-md text-xs font-medium hover:bg-gray-800 shadow-sm">
-                                            Submit
-                                        </button>
+                            return (
+                                <div key={p.id || idx} className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm flex flex-col">
+                                    <div className="flex justify-between items-center mb-3">
+                                        <span className="text-xs font-bold text-indigo-500 uppercase tracking-wider">Practice #{idx + 1}</span>
+                                        {p.id && <span className="text-[10px] text-gray-400">ID: {p.id}</span>}
                                     </div>
 
-                                    {/* Solution Reveal */}
-                                    {showPracticeSolutions[idx] && (
-                                        <div className="mt-3 p-3 bg-green-50 rounded-lg border border-green-100 text-sm animate-in fade-in zoom-in-95">
-                                            <p className="font-semibold text-green-800 mb-1">Answer:</p>
-                                            <div className="text-gray-800 mb-2">{p.answer}</div>
-                                            <p className="font-semibold text-green-800 mb-1">Solution:</p>
-                                            <div className="text-gray-700">
-                                                <LatexRenderer content={p.solution} block />
+                                    {/* Problem Content */}
+                                    <div className="mb-4 text-gray-800 flex-grow">
+                                        <LatexRenderer content={p.latex_content || p.latex || ""} block />
+                                    </div>
+
+                                    {/* Input Area */}
+                                    <div className="space-y-3 mt-4">
+
+                                        <div className="flex justify-between items-center">
+                                            <div className="flex gap-2">
+                                                <label className="px-3 py-1.5 bg-gray-100 text-gray-600 rounded-md text-xs font-medium hover:bg-gray-200 cursor-pointer flex items-center gap-1 transition-colors">
+                                                    📸 {practiceFiles[p.id || idx] ? 'Photo Selected' : 'Photo'}
+                                                    <input
+                                                        type="file"
+                                                        accept="image/*"
+                                                        className="hidden"
+                                                        onChange={(e) => {
+                                                            const file = e.target.files?.[0] || null;
+                                                            setPracticeFiles({ ...practiceFiles, [p.id || idx]: file });
+                                                        }}
+                                                    />
+                                                </label>
+                                                <button
+                                                    onClick={() => setShowPracticeSolutions({ ...showPracticeSolutions, [p.id || idx]: !showPracticeSolutions[p.id || idx] })}
+                                                    className="px-3 py-1.5 text-indigo-600 hover:bg-indigo-50 rounded-md text-xs font-medium transition-colors"
+                                                >
+                                                    {showPracticeSolutions[p.id || idx] ? 'Hide' : '👁 Solution'}
+                                                </button>
                                             </div>
+                                            <button
+                                                onClick={() => handlePracticeSolutionUpload(p.id, idx)}
+                                                disabled={!practiceFiles[p.id || idx] || isAnalyzingPractice[p.id || idx]}
+                                                className="px-4 py-1.5 bg-gray-900 text-white rounded-md text-xs font-medium hover:bg-gray-800 shadow-sm disabled:opacity-50 flex items-center gap-2"
+                                            >
+                                                {isAnalyzingPractice[p.id || idx] ? (
+                                                    <><Loader2 className="w-3 h-3 animate-spin" /> Checking...</>
+                                                ) : (
+                                                    'Analyze'
+                                                )}
+                                            </button>
                                         </div>
-                                    )}
+
+                                        {/* Practice Solution Feedback */}
+                                        {practiceAnalysisResults[p.id || idx] && (
+                                            <div className="mt-4 bg-white border border-indigo-100 rounded-xl overflow-hidden animate-in fade-in slide-in-from-top-2">
+                                                <div className="bg-indigo-50/50 p-3 border-b border-indigo-50 flex justify-between items-center">
+                                                    <h3 className="font-semibold text-sm text-indigo-900 flex items-center gap-2">
+                                                        🤖 AI Assessment
+                                                    </h3>
+                                                    <div className="flex items-center gap-1">
+                                                        <span className="text-xs text-indigo-600 font-medium">Score:</span>
+                                                        <span className={`text-sm font-bold ${practiceAnalysisResults[p.id || idx].score >= 80 ? 'text-green-600' : practiceAnalysisResults[p.id || idx].score >= 60 ? 'text-yellow-600' : 'text-red-600'}`}>
+                                                            {practiceAnalysisResults[p.id || idx].score}/100
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                                <div className="p-3 space-y-3">
+                                                    {practiceAnalysisResults[p.id || idx].logic_gaps && practiceAnalysisResults[p.id || idx].logic_gaps.length > 0 && (
+                                                        <div>
+                                                            <h4 className="text-xs font-bold text-red-700 mb-1 flex items-center gap-1">🚫 Logic Issues</h4>
+                                                            <ul className="list-disc list-inside text-xs text-gray-700 bg-red-50/50 p-2 rounded">
+                                                                {practiceAnalysisResults[p.id || idx].logic_gaps.map((gap: string, i: number) => <li key={i}>{gap}</li>)}
+                                                            </ul>
+                                                        </div>
+                                                    )}
+                                                    {practiceAnalysisResults[p.id || idx].calculation_errors && practiceAnalysisResults[p.id || idx].calculation_errors.length > 0 && (
+                                                        <div>
+                                                            <h4 className="text-xs font-bold text-orange-700 mb-1 flex items-center gap-1">⚠️ Calc Errors</h4>
+                                                            <ul className="list-disc list-inside text-xs text-gray-700 bg-orange-50/50 p-2 rounded">
+                                                                {practiceAnalysisResults[p.id || idx].calculation_errors.map((err: string, i: number) => <li key={i}>{err}</li>)}
+                                                            </ul>
+                                                        </div>
+                                                    )}
+                                                    {practiceAnalysisResults[p.id || idx].suggestions && (
+                                                        <div>
+                                                            <h4 className="text-xs font-bold text-blue-700 mb-1 flex items-center gap-1">💡 Suggestion</h4>
+                                                            <div className="text-xs text-gray-700 bg-blue-50/50 p-2 rounded">
+                                                                <LatexRenderer content={practiceAnalysisResults[p.id || idx].suggestions} block={false} />
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Solution Reveal */}
+                                        {showPracticeSolutions[p.id || idx] && (
+                                            <div className="mt-3 p-3 bg-green-50 rounded-lg border border-green-100 text-sm animate-in fade-in zoom-in-95">
+                                                <p className="font-semibold text-green-800 mb-1">Answer:</p>
+                                                <div className="text-gray-800 mb-2">{aiData.answer || p.answer || "N/A"}</div>
+                                                <p className="font-semibold text-green-800 mb-1">Solution:</p>
+                                                <div className="text-gray-700">
+                                                    <LatexRenderer content={aiData.solution || p.solution || ""} block />
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
                                 </div>
-                            </div>
-                        ))}
+                            )
+                        })}
                     </div>
                 )}
             </div>
@@ -465,6 +554,38 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
         }
     }
 
+    async function handlePracticeSolutionUpload(practiceProblemId: number | undefined, arrayIdx: number) {
+        // Fallback to array index if practice problem isn't saved in DB yet (edge case)
+        const idKey = practiceProblemId || arrayIdx;
+        const file = practiceFiles[idKey];
+        if (!file || !practiceProblemId) {
+            alert("Cannot analyze: No file selected or problem ID missing. Please refresh and try again.");
+            return;
+        }
+
+        setIsAnalyzingPractice(prev => ({ ...prev, [idKey]: true }));
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            const res = await fetchWithAuth(`/api/practice-problems/${practiceProblemId}/submit_solution`, {
+                method: 'POST',
+                body: formData
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setPracticeAnalysisResults(prev => ({ ...prev, [idKey]: data.feedback_json }));
+            } else {
+                alert("Practice analysis failed.");
+            }
+        } catch (e) {
+            console.error(e);
+            alert("Error uploading practice solution.");
+        } finally {
+            setIsAnalyzingPractice(prev => ({ ...prev, [idKey]: false }));
+        }
+    }
+
     async function updateMastery(level: number) {
         setMasteryLevel(level);
         try {
@@ -487,7 +608,8 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
             });
             if (res.ok) {
                 const data = await res.json();
-                setPracticeProblems(data);
+                // Append new generated problems safely, allowing user to keep generating more
+                setPracticeProblems(prev => [...prev, ...data]);
             } else {
                 alert("Failed to generate practice problems. Try again later.");
             }
