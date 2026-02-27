@@ -41,6 +41,8 @@ class Problem(Base):
     ai_analysis = Column(JSON, nullable=True)
     difficulty = Column(Integer, nullable=True) # 1-5 scale or similar
     knowledge_path = Column(String, nullable=True, index=True) 
+    ai_model = Column(String, nullable=True) # Successfully used AI model name
+    source_problem_id = Column(Integer, ForeignKey("problems.id"), nullable=True) # For generated variations
     created_at = Column(DateTime, default=datetime.utcnow)
     
     user = relationship("User", backref="problems")

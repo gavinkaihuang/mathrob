@@ -70,7 +70,7 @@ class AIService:
                     generation_config=generation_config
                 )
                 
-                return response.text
+                return response.text, model_name
                 
             except Exception as e:
                 print(f"[WARNING] 主模型 {model_name} ({role}) 调用失败，正在切换至备选模型 (if available)。Error: {e}")
@@ -206,7 +206,7 @@ class AIService:
 
         try:
             # Route to VISION models
-            text = await self.call_gemini_with_fallback('vision', prompt, image_path)
+            text, used_model = await self.call_gemini_with_fallback('vision', prompt, image_path)
             
             # Clean up markdown
             text = re.sub(r'```json\n|\n```', '', text).strip()
@@ -236,7 +236,9 @@ class AIService:
             # Robustly fix LaTeX delimiters
             validated_data.latex_content = self._fix_latex(validated_data.latex_content)
             
-            return validated_data.dict()
+            result = validated_data.dict()
+            result["ai_model"] = used_model
+            return result
 
         except Exception as e:
             print(f"Analysis failed: {e}")
@@ -260,60 +262,79 @@ class AIService:
         text = re.sub(r'(?<!\$)\\\\underline\\{.*?\\}', r'$\g<0>$', text)
         return text
 
-    async def generate_similar_problems(self, original_latex: str, knowledge_points: List[str] = []) -> List[Dict[str, Any]]:
+    async def generate_similar_problems(self, original_latex: str, knowledge_points: List[str] = [], difficulty: int = 1, knowledge_path_name: str = "相关知识点") -> Dict[str, Any]:
         """
-        Generates 2 similar practice problems based on the original problem.
-        Uses UTILITY models.
+        Generates 2 similar practice problems with rich context and rigorous prompt.
         """
-        kp_str = ", ".join(knowledge_points) if knowledge_points else "General Math"
+        kp_str = ", ".join(knowledge_points) if knowledge_points else knowledge_path_name
         
         prompt = f"""
-        Role: Math Teacher.
-        Task: Create 2 NEW math problems that are similar to the following problem, testing the same knowledge points ({kp_str}) and having the same difficulty level.
+        # Role
+        You are an expert Math Teacher specialized in the Shanghai High School Mathematics curriculum.
         
-        Original Problem (LaTeX):
-        {original_latex}
+        # Task
+        Based on the following ORIGINAL problem, create 2 NEW variations for student practice.
         
-        Requirements:
-        1. CHANGE the numbers and specific context, but keep the core logic/method same.
-        2. Output purely as a JSON list.
-        3. Double escape backslashes in LaTeX strings (e.g. \\\\frac).
+        # Context
+        - Original Problem (LaTeX): {original_latex}
+        - Primary Knowledge Point: {knowledge_path_name}
+        - Additional Points: {kp_str}
+        - Target Difficulty: {difficulty} (Scale 1-5)
         
-        Output Schema (JSON List):
-        [
-            {{
-                "latex": "Problem 1 LaTeX string",
-                "answer": "Short answer string",
-                "solution": "Step-by-step solution string",
-                "id": 1
-            }},
-            {{
-                "latex": "Problem 2 LaTeX string",
-                "answer": "Short answer string",
-                "solution": "Step-by-step solution string",
-                "id": 2
-            }}
-        ]
+        # Generation Guidelines (STRICT)
+        1. **Consistency**: The new problems MUST test the same core mathematical concepts and stay within the High School curriculum scope.
+        2. **Variation**: CHANGE the scenario, variables, or numeric data. Avoid simple duplication.
+        3. **Rigorous Design**: 
+           - Ensure the problem is mathematically sound and has a unique, solvable answer.
+           - Avoid "degenerate cases" or "excessive computation".
+           - Maintain the target difficulty level.
+        4. **Language**: Use Simplified Chinese.
+        
+        # Format Requirements
+        - Use standard LaTeX for formulas, enclosed in single dollar signs $.
+        - Double-escape backslashes in JSON strings (e.g., "\\\\frac").
+        - Output strictly valid JSON.
+        
+        # Output Schema
+        {{
+            "problems": [
+                {{
+                    "latex": "Problem LaTeX string",
+                    "thinking_process": "Brief hint/breakthrough point",
+                    "solution": "Step-by-step detailed solution",
+                    "answer": "Final concise answer"
+                }}
+            ]
+        }}
         """
         
         try:
-            # Route to UTILITY models
-            text = await self.call_gemini_with_fallback('utility', prompt)
+            # Route to UTILITY/REASONING models
+            text, used_model = await self.call_gemini_with_fallback('utility', prompt)
             
             # Clean and parse
             text = re.sub(r'```json\n|\n```', '', text).strip()
-            data = json.loads(text)
             
-            if isinstance(data, list):
-                # Basic Post-processing to ensure LaTeX is valid
-                for item in data:
-                    if 'latex' in item:
-                        item['latex'] = self._fix_latex(item['latex'])
-            return data
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                data = json.loads(text, strict=False)
+            
+            problems = data.get("problems", [])
+            
+            # Post-processing
+            for item in problems:
+                if 'latex' in item:
+                    item['latex'] = self._fix_latex(item['latex'])
+            
+            return {
+                "problems": problems,
+                "ai_model": used_model
+            }
             
         except Exception as e:
             print(f"Error generating similar problems: {e}")
-            return []
+            return {"problems": [], "error": str(e)}
 
     async def analyze_solution(self, problem_latex: str, standard_solution: str, solution_image_path: str):
         """

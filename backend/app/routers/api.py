@@ -26,6 +26,7 @@ class ProblemSchema(BaseModel):
     ai_analysis: Optional[Union[dict, str]] = None
     created_at: datetime
     current_mastery_level: Optional[int] = None
+    ai_model: Optional[str] = None
     
     class Config:
         orm_mode = True
@@ -247,6 +248,7 @@ async def reanalyze_problem(problem_id: int, db: Session = Depends(get_db), curr
     problem.ai_analysis = ai_data
     problem.difficulty = analysis_result.get("difficulty", 1)
     problem.knowledge_path = kp_path
+    problem.ai_model = analysis_result.get("ai_model")
     
     db.commit()
     db.refresh(problem)
@@ -255,23 +257,42 @@ async def reanalyze_problem(problem_id: int, db: Session = Depends(get_db), curr
 
 @router.post("/problems/{problem_id}/similar")
 async def generate_similar_practice(problem_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from ..models import KnowledgeNode
+    
     problem = db.query(Problem).filter(Problem.id == problem_id, Problem.user_id == current_user.id).first()
     if not problem:
         raise HTTPException(status_code=404, detail="Problem not found")
     
-    # Extract info
+    # Extract rich context
     latex = problem.latex_content or "N/A"
+    difficulty = problem.difficulty or 1
     
-    # Handle knowledge points safely
+    # Get knowledge node name for better AI context
+    knowledge_path_name = "相关知识点"
+    if problem.knowledge_path:
+        root_path = problem.knowledge_path.split('.')[0] + '.' + problem.knowledge_path.split('.')[1] if len(problem.knowledge_path.split('.')) > 1 else problem.knowledge_path
+        node = db.query(KnowledgeNode).filter(KnowledgeNode.path == problem.knowledge_path).first()
+        if node:
+            knowledge_path_name = node.name
+
+    # Handle knowledge points safely from JSON
     kps = []
-    if problem.ai_analysis:
-        # Check if dict or str (since we support Union now)
-        if isinstance(problem.ai_analysis, dict):
-             kps = problem.ai_analysis.get("knowledge_points", [])
-        # If str, we ignore or try to parse, but let's just ignore for safety/speed
+    if problem.ai_analysis and isinstance(problem.ai_analysis, dict):
+        kps = problem.ai_analysis.get("knowledge_points", [])
     
-    # Call AI
-    similar_problems = await ai_service.generate_similar_problems(latex, kps)
+    # Call AI with rich context
+    result = await ai_service.generate_similar_problems(
+        original_latex=latex, 
+        knowledge_points=kps, 
+        difficulty=difficulty,
+        knowledge_path_name=knowledge_path_name
+    )
+    
+    # Extract problems from result
+    similar_problems = result.get("problems", [])
+    
+    # Note: For now, we return these for the user to practice. 
+    # Persisting them as separate Problem records can be done if the user later wants to "Add to Review".
     
     return similar_problems
 

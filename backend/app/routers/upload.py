@@ -72,6 +72,7 @@ async def upload_file(
         ai_analysis=ai_data,
         difficulty=analysis_result.get("difficulty", 1),
         knowledge_path=kp_path,
+        ai_model=analysis_result.get("ai_model"),
         created_at=datetime.utcnow()
     )
     
