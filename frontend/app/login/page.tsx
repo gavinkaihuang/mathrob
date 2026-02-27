@@ -47,6 +47,7 @@ export default function LoginPage() {
         <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
             <div className="w-full max-w-md bg-white rounded-2xl shadow-xl p-8 space-y-6">
                 <div className="text-center space-y-2">
+                    <img src="/logo.jpg" alt="Logo" className="w-20 h-20 mx-auto rounded-3xl shadow-lg mb-4" />
                     <h1 className="text-3xl font-bold text-gray-900">MathRob AI</h1>
                     <p className="text-gray-500">Sign in to continue your learning journey</p>
                 </div>

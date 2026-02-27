@@ -216,6 +216,43 @@ def get_daily_review_problems(db: Session = Depends(get_db), current_user: User 
             
     return problems
 
+@router.post("/problems/{problem_id}/reanalyze")
+async def reanalyze_problem(problem_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from ..models import KnowledgeNode
+    
+    problem = db.query(Problem).filter(Problem.id == problem_id, Problem.user_id == current_user.id).first()
+    if not problem:
+        raise HTTPException(status_code=404, detail="Problem not found")
+        
+    # Re-run AI analysis
+    try:
+        analysis_result = await ai_service.analyze_image(problem.image_path)
+    except Exception as e:
+        print(f"Re-analysis failed: {e}")
+        raise HTTPException(status_code=500, detail=f"AI Analysis failed: {str(e)}")
+
+    # Extract and Validate Knowledge Path
+    kp_path = analysis_result.get("knowledge_path")
+    if kp_path:
+        exists = db.query(KnowledgeNode).filter(KnowledgeNode.path == kp_path).first()
+        if not exists:
+            print(f"Warning: AI returned non-existent knowledge path during re-analysis: {kp_path}")
+    
+    # Update Problem record
+    ai_data = analysis_result.get("ai_analysis", {})
+    if "knowledge_points" in analysis_result:
+        ai_data["knowledge_points"] = analysis_result["knowledge_points"]
+
+    problem.latex_content = analysis_result.get("latex_content")
+    problem.ai_analysis = ai_data
+    problem.difficulty = analysis_result.get("difficulty", 1)
+    problem.knowledge_path = kp_path
+    
+    db.commit()
+    db.refresh(problem)
+    
+    return {"message": "Problem re-analyzed successfully", "id": problem.id, "knowledge_path": kp_path}
+
 @router.post("/problems/{problem_id}/similar")
 async def generate_similar_practice(problem_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     problem = db.query(Problem).filter(Problem.id == problem_id, Problem.user_id == current_user.id).first()

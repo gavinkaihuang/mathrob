@@ -20,6 +20,7 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
 
     const [practiceProblems, setPracticeProblems] = useState<any[]>([]);
     const [generatingPractice, setGeneratingPractice] = useState(false);
+    const [isReanalyzing, setIsReanalyzing] = useState(false);
     const [practiceAnswers, setPracticeAnswers] = useState<{ [key: number]: string }>({});
     const [showPracticeSolutions, setShowPracticeSolutions] = useState<{ [key: number]: boolean }>({});
 
@@ -69,8 +70,24 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
                 </Link>
 
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-                    <div className="p-6 border-b border-gray-100">
+                    <div className="p-6 border-b border-gray-100 flex justify-between items-center">
                         <h1 className="text-2xl font-bold text-gray-900">Problem Analysis #{problem.id}</h1>
+                        <button
+                            onClick={handleReanalyze}
+                            disabled={isReanalyzing}
+                            className="inline-flex items-center px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50 transition-colors text-sm font-medium border border-gray-200"
+                        >
+                            {isReanalyzing ? (
+                                <>
+                                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                    Re-analyzing...
+                                </>
+                            ) : (
+                                <>
+                                    ✨ 重新分析 (Re-analyze)
+                                </>
+                            )}
+                        </button>
                     </div>
 
                     <div className="grid md:grid-cols-[1fr_2fr] gap-8 p-6">
@@ -453,6 +470,28 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
             alert("Error connecting to AI service.");
         } finally {
             setGeneratingPractice(false);
+        }
+    }
+
+    async function handleReanalyze() {
+        if (!confirm("Are you sure you want to re-run AI analysis? This will overwrite existing results.")) {
+            return;
+        }
+        setIsReanalyzing(true);
+        try {
+            const res = await fetchWithAuth(`/api/problems/${id}/reanalyze`, {
+                method: 'POST'
+            });
+            if (res.ok) {
+                window.location.reload();
+            } else {
+                alert("Re-analysis failed.");
+            }
+        } catch (e) {
+            console.error(e);
+            alert("Error connecting to server.");
+        } finally {
+            setIsReanalyzing(false);
         }
     }
 }
