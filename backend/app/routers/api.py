@@ -217,6 +217,61 @@ def get_daily_review_problems(db: Session = Depends(get_db), current_user: User 
             
     return problems
 
+@router.post("/problems/{problem_id}/review")
+async def review_problem(
+    problem_id: int, 
+    score: int, # 0, 1, 2
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    from ..services.srs_logic import calculate_next_review
+    from ..models import LearningRecord
+    
+    problem = db.query(Problem).filter(Problem.id == problem_id, Problem.user_id == current_user.id).first()
+    if not problem:
+        raise HTTPException(status_code=404, detail="Problem not found")
+
+    # Find or create learning record
+    record = db.query(LearningRecord).filter(
+        LearningRecord.problem_id == problem_id,
+        LearningRecord.user_id == current_user.id
+    ).first()
+    
+    if not record:
+        record = LearningRecord(
+            user_id=current_user.id,
+            problem_id=problem_id,
+            ease_factor=2.5,
+            interval=0,
+            repetitions=0
+        )
+        db.add(record)
+    
+    # Calculate new stats
+    new_ef, new_interval, new_reps, next_date = calculate_next_review(
+        record.ease_factor,
+        record.interval,
+        record.repetitions,
+        score
+    )
+    
+    # Update record
+    record.ease_factor = new_ef
+    record.interval = new_interval
+    record.repetitions = new_reps
+    record.review_date = next_date
+    record.mastery_level = score # Sync with UI selection
+    record.status = "correct" if score == 2 else "wrong" # Basic status sync
+    
+    db.commit()
+    db.refresh(record)
+    
+    return {
+        "message": "Review recorded",
+        "next_review_date": record.review_date.isoformat(),
+        "interval": record.interval
+    }
+
 @router.post("/problems/{problem_id}/reanalyze")
 async def reanalyze_problem(problem_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from ..models import KnowledgeNode
