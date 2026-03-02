@@ -130,3 +130,13 @@ class SystemLog(Base):
     details = Column(JSON, nullable=True)  # Store robust error tracebacks or input states
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class UserProgress(Base):
+    __tablename__ = "user_progress"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    knowledge_path = Column(String, index=True, nullable=False) # Maps to ltree
+    is_learned = Column(Boolean, default=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", backref="progress_records")

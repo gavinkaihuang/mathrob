@@ -121,6 +121,21 @@ export default function SettingsPage() {
             <h1 className="text-3xl font-bold text-gray-900 mb-2">系统设置 (System Settings)</h1>
             <p className="text-gray-500 mb-8">在这里配置系统运行所需的各种基础参数，例如大语言模型选择等。</p>
 
+            <div className="mb-8 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                <div className="p-6 border-b border-gray-200 bg-gray-50 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                    <div>
+                        <h2 className="text-xl font-semibold text-gray-800">学习进度管理 (Curriculum Progress)</h2>
+                        <p className="text-sm text-gray-500 mt-1">管理您已经掌握的知识节点，以便系统为您精准过滤题目</p>
+                    </div>
+                    <button
+                        onClick={() => router.push('/settings/progress')}
+                        className="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none"
+                    >
+                        去配置 / Configure
+                    </button>
+                </div>
+            </div>
+
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                 <div className="p-6 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
                     <div>

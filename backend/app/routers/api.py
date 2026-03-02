@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Union
 from pydantic import BaseModel
 from ..database import get_db
-from ..models import Problem, KnowledgePoint, LearningRecord, SolutionAttempt, User, PracticeProblem
+from ..models import Problem, KnowledgePoint, LearningRecord, SolutionAttempt, User, PracticeProblem, UserProgress
 import os
 from datetime import datetime
 from ..services.ai_service import AIService
@@ -90,14 +90,21 @@ def get_problem(problem_id: int, db: Session = Depends(get_db), current_user: Us
         
     return problem
 
-# Knowledge Points Endpoints
-@router.get("/knowledge-points", response_model=List[KnowledgePointSchema])
-def get_knowledge_tree(db: Session = Depends(get_db)):
-    # Simple tree retrieval - fetch root nodes (parent_id is NULL)
-    # Recursion handled by Pydantic model response structure if relationships are set up correctly
-    # Note: For deep trees, this might need optimization (CTE or eager loading)
-    roots = db.query(KnowledgePoint).filter(KnowledgePoint.parent_id == None).all()
-    return roots
+# Knowledge Nodes Endpoints (Using ltree paths)
+from ..models import KnowledgeNode
+
+class KnowledgeNodeSchema(BaseModel):
+    id: int
+    name: str
+    path: str
+    
+    class Config:
+        orm_mode = True
+
+@router.get("/knowledge-nodes", response_model=List[KnowledgeNodeSchema])
+def get_knowledge_nodes(db: Session = Depends(get_db)):
+    return db.query(KnowledgeNode).order_by(KnowledgeNode.path).all()
+
 
 class MasteryRequest(BaseModel):
     level: int # 1, 2, 3
@@ -526,11 +533,18 @@ async def get_today_reviews(db: Session = Depends(get_db), current_user: User = 
     today = datetime.utcnow()
     
     # 1. Query problems due for review
-    # We join Problem with LearningRecord to find due items
-    due_records = db.query(LearningRecord).join(Problem).filter(
+    # We join Problem and UserProgress to ensure the problem belongs to a learned knowledge_path
+    due_records = db.query(LearningRecord).join(Problem).join(
+        UserProgress,
+        and_(
+            Problem.knowledge_path == UserProgress.knowledge_path,
+            UserProgress.user_id == current_user.id
+        )
+    ).filter(
         and_(
             LearningRecord.user_id == current_user.id,
-            LearningRecord.review_date <= today
+            LearningRecord.review_date <= today,
+            UserProgress.is_learned == True
         )
     ).all()
     
@@ -605,3 +619,43 @@ def download_report(report_id: int, db: Session = Depends(get_db), current_user:
         raise HTTPException(status_code=404, detail="File not found on server")
         
     return FileResponse(file_path, filename=os.path.basename(file_path), media_type='application/pdf')
+
+# --- Progress ---
+class ProgressUpdateRequest(BaseModel):
+    paths: List[str]
+
+@router.get("/progress")
+def get_progress(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    records = db.query(UserProgress).filter(
+        UserProgress.user_id == current_user.id,
+        UserProgress.is_learned == True
+    ).all()
+    return [r.knowledge_path for r in records]
+
+@router.post("/progress/batch-update")
+def batch_update_progress(request: ProgressUpdateRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from sqlalchemy import text
+    
+    # 1. Clear existing progress
+    db.query(UserProgress).filter(UserProgress.user_id == current_user.id).delete()
+    db.commit()
+
+    if not request.paths:
+        return {"status": "success", "learned_count": 0}
+
+    # 2. Find all descendants using ltree
+    # We pass the paths array to the ANY operator in Postgres
+    query = text("SELECT path FROM knowledge_nodes WHERE path <@ ANY(:paths ::ltree[])")
+    result = db.execute(query, {"paths": request.paths}).fetchall()
+    
+    learned_paths = [row[0] for row in result]
+    
+    # 3. Save new records
+    new_records = [
+        UserProgress(user_id=current_user.id, knowledge_path=path, is_learned=True)
+        for path in set(learned_paths)
+    ]
+    db.add_all(new_records)
+    db.commit()
+    
+    return {"status": "success", "learned_count": len(new_records)}
