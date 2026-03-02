@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional
 import traceback
 from ..database import SessionLocal
 from ..models import SystemLog
+from .token_manager import token_manager
 
 class AIAnalysisResponse(BaseModel):
     latex_content: str
@@ -29,11 +30,8 @@ class AIServiceException(Exception):
 
 class AIService:
     def __init__(self):
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            print("Warning: GEMINI_API_KEY not set")
-        else:
-            genai.configure(api_key=api_key)
+        # Global genai token configure removed. Managed dynamically per-request.
+        pass
 
     def _log_system_error(self, category: str, message: str, details: Any = None):
         try:
@@ -74,31 +72,51 @@ class AIService:
         last_error = None
         
         for model_name, role in candidates:
-            try:
-                print(f"[{category.upper()}] Calling {role} model: {model_name}...")
-                model = genai.GenerativeModel(model_name)
-                
-                generation_config = {"response_mime_type": "application/json"}
-                
-                content = [prompt]
-                if image_path:
-                    # Note: PIL.Image.open is lazy, load() makes it eager.
-                    # Opening is fast, processing happens at send.
-                    # We open fresh for each attempt to avoid closed file issues if any.
-                    img = PIL.Image.open(image_path)
-                    content.append(img)
-                
-                # Use async generation
-                response = await model.generate_content_async(
-                    content,
-                    generation_config=generation_config
-                )
-                
-                return response.text, model_name
-                
-            except Exception as e:
-                print(f"[WARNING] 主模型 {model_name} ({role}) 调用失败，正在切换至备选模型 (if available)。Error: {e}")
-                last_error = e
+            # We will attempt multiple keys for each model before giving up on that model.
+            max_token_retries = max(1, len(token_manager.keys) * 2) 
+            token_retry_count = 0
+            
+            while token_retry_count < max_token_retries:
+                try:
+                    current_token = token_manager.get_next_token()
+                    # Configure module for this API call. Note: This sets global state for the module.
+                    # Since genai doesn't easily support instance-based clients for async generation in older versions,
+                    # this is a required trade-off in threaded/async envs using the global client.
+                    genai.configure(api_key=current_token)
+                    
+                    print(f"[{category.upper()}] Calling {role} model: {model_name} (Attempt {token_retry_count + 1})")
+                    model = genai.GenerativeModel(model_name)
+                    
+                    generation_config = {"response_mime_type": "application/json"}
+                    
+                    content = [prompt]
+                    if image_path:
+                        img = PIL.Image.open(image_path)
+                        content.append(img)
+                    
+                    # Use async generation
+                    response = await model.generate_content_async(
+                        content,
+                        generation_config=generation_config
+                    )
+                    
+                    return response.text, model_name
+                    
+                except Exception as e:
+                    last_error = e
+                    last_error_str = str(last_error).lower()
+                    
+                    # Check if error is related to quota or rate limit
+                    if "429" in last_error_str or "resourceexhausted" in last_error_str or "quota" in last_error_str:
+                        print(f"[WARNING] 触发限频或配额耗尽: {e}")
+                        token_manager.mark_token_exhausted(current_token)
+                        token_retry_count += 1
+                        # Continue to next iteration to try next token
+                        continue
+                    else:
+                        print(f"[WARNING] 主模型 {model_name} ({role}) 调用失败，正在切换至备选模型 (if available)。Error: {e}")
+                        # Not a token issue, break inner loop to fall back to next model candidate
+                        break
         # If we got here, all models failed
         error_msg = f"All models failed for {category}. Last error: {str(last_error)}"
         
