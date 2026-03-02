@@ -13,39 +13,68 @@ class ModelConfig(BaseModel):
     MODEL_TEACHING_PRIMARY: Optional[str] = None
     MODEL_UTILITY_PRIMARY: Optional[str] = None
 
-@router.get("/settings/models/available")
-async def get_available_models():
-    """
-    Fetches the list of available Gemini models.
-    """
-    try:
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-             return {"models": ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-lite"]} # Fallback list if no key
-        
-        genai.configure(api_key=api_key)
-        # Typically we only want text/generation models for these tasks
-        models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                # remove "models/" prefix from the name returned by API usually
-                name = m.name.replace("models/", "")
-                models.append(name)
-        
-        # If API fails to return or returns empty, provide fallbacks
-        if not models:
-             models = ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-lite", "gemini-3-pro"]
-
-        return {"models": models}
-    except Exception as e:
-        print(f"Error fetching models: {e}")
-        # Return a default list if internet is down or API key is invalid
-        return {"models": ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-lite", "gemini-3-pro"]}
-
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import ModelConfig as DBModelConfig
 from ..services.model_manager import model_manager
+from ..services.token_manager import token_manager
+
+import time
+
+# Module-level cache for available models to prevent slow page loads
+_cached_models = None
+_cache_time = 0
+CACHE_DURATION = 3600  # 1 hour
+
+@router.get("/settings/models/available")
+async def get_available_models(db: Session = Depends(get_db)):
+    """
+    Fetches the list of available Gemini models using a dynamic DB token.
+    Uses an in-memory cache to prevent blocking the frontend on every page load.
+    """
+    global _cached_models, _cache_time
+    
+    # Return from cache if valid
+    if _cached_models and (time.time() - _cache_time < CACHE_DURATION):
+        return {"models": _cached_models}
+        
+    try:
+        api_key = None
+        try:
+            token_record = token_manager.get_available_token(db)
+            api_key = token_record.api_key
+        except Exception as msg:
+            print(f"Token pool empty or issues accessing DB tokens: {msg}")
+
+        # Fallback to local env if DB token not found
+        if not api_key:
+            api_key = os.getenv("GEMINI_API_KEY")
+            
+        if not api_key:
+             return {"models": ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-lite"]} 
+        
+        genai.configure(api_key=api_key)
+        models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                name = m.name.replace("models/", "")
+                models.append(name)
+        
+        if not models:
+             models = ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-lite", "gemini-3-pro"]
+             return {"models": models}
+
+        # Update cache
+        _cached_models = models
+        _cache_time = time.time()
+
+        return {"models": models}
+    except Exception as e:
+        print(f"Error fetching models dynamically: {e}")
+        # Return cache even if expired if we encounter an error, else fallback list
+        if _cached_models:
+            return {"models": _cached_models}
+        return {"models": ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-lite", "gemini-3-pro"]}
 
 @router.get("/settings/models/config", response_model=ModelConfig)
 async def get_model_config(db: Session = Depends(get_db)):
