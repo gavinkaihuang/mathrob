@@ -50,75 +50,68 @@ class AIService:
 
     async def call_gemini_with_fallback(self, category: str, prompt: str, image_path: str = None) -> str:
         """
-        Routes request to PRIMARY model for category, falls back to FALLBACK model on failure.
+        Routes request to the appropriate model based on configuration in the DB.
         Categories: 'vision', 'teaching', 'utility'
         """
-        # Resolve model names
-        primary_env = f"MODEL_{category.upper()}_PRIMARY"
-        fallback_env = f"MODEL_{category.upper()}_FALLBACK"
+        from .model_manager import model_manager
         
-        primary_model = os.getenv(primary_env)
-        fallback_model = os.getenv(fallback_env)
-        
-        # Default safety net
-        if not primary_model:
-            primary_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
-            print(f"Warning: {primary_env} not set. Defaulting to {primary_model}")
-
-        candidates = [(primary_model, "Primary")]
-        if fallback_model and fallback_model != primary_model:
-            candidates.append((fallback_model, "Fallback"))
-
         last_error = None
+        max_token_retries = 3 
+        token_retry_count = 0
+        model_name = "unknown"
         
-        for model_name, role in candidates:
-            # We will attempt multiple keys for each model before giving up on that model.
-            max_token_retries = max(1, len(token_manager.keys) * 2) 
-            token_retry_count = 0
-            
-            while token_retry_count < max_token_retries:
-                try:
-                    current_token = token_manager.get_next_token()
-                    # Configure module for this API call. Note: This sets global state for the module.
-                    # Since genai doesn't easily support instance-based clients for async generation in older versions,
-                    # this is a required trade-off in threaded/async envs using the global client.
-                    genai.configure(api_key=current_token)
-                    
-                    print(f"[{category.upper()}] Calling {role} model: {model_name} (Attempt {token_retry_count + 1})")
-                    model = genai.GenerativeModel(model_name)
-                    
-                    generation_config = {"response_mime_type": "application/json"}
-                    
-                    content = [prompt]
-                    if image_path:
-                        img = PIL.Image.open(image_path)
-                        content.append(img)
-                    
-                    # Use async generation
-                    response = await model.generate_content_async(
-                        content,
-                        generation_config=generation_config
-                    )
-                    
-                    return response.text, model_name
-                    
-                except Exception as e:
-                    last_error = e
-                    last_error_str = str(last_error).lower()
-                    
-                    # Check if error is related to quota or rate limit
-                    if "429" in last_error_str or "resourceexhausted" in last_error_str or "quota" in last_error_str:
-                        print(f"[WARNING] 触发限频或配额耗尽: {e}")
-                        token_manager.mark_token_exhausted(current_token)
-                        token_retry_count += 1
-                        # Continue to next iteration to try next token
-                        continue
-                    else:
-                        print(f"[WARNING] 主模型 {model_name} ({role}) 调用失败，正在切换至备选模型 (if available)。Error: {e}")
-                        # Not a token issue, break inner loop to fall back to next model candidate
-                        break
-        # If we got here, all models failed
-        error_msg = f"All models failed for {category}. Last error: {str(last_error)}"
+        while token_retry_count < max_token_retries:
+            db_session = SessionLocal()
+            try:
+                # Resolve active model from DB cache
+                model_name = model_manager.get_model_name(db_session, category)
+                
+                # Retrieve active API Token
+                current_token_record = token_manager.get_available_token(db_session)
+                current_token = current_token_record.api_key
+                token_id = current_token_record.id
+                token_name = current_token_record.name
+                
+                # Configure module for this API call
+                genai.configure(api_key=current_token)
+                
+                print(f"[{category.upper()}] Calling model: {model_name} with Token {token_name} (Attempt {token_retry_count + 1})")
+                model = genai.GenerativeModel(model_name)
+                
+                generation_config = {"response_mime_type": "application/json"}
+                
+                content = [prompt]
+                if image_path:
+                    img = PIL.Image.open(image_path)
+                    content.append(img)
+                
+                # Use async generation
+                response = await model.generate_content_async(
+                    content,
+                    generation_config=generation_config
+                )
+                
+                db_session.close()
+                return response.text, model_name
+                
+            except Exception as e:
+                last_error = e
+                last_error_str = str(last_error).lower()
+                
+                # Check if error is related to quota or rate limit
+                if "429" in last_error_str or "resourceexhausted" in last_error_str or "quota" in last_error_str:
+                    print(f"[WARNING] 触发限频或配额耗尽 (Token: {token_name}): {e}")
+                    token_manager.report_token_error(db_session, token_id, token_name, str(e))
+                    token_retry_count += 1
+                    db_session.close()
+                    continue
+                else:
+                    print(f"[WARNING] 模型 {model_name} 调用失败。Error: {e}")
+                    db_session.close()
+                    break
+
+        # If we got here, all attempts failed
+        error_msg = f"Model generation failed for {category}. Last error: {str(last_error)}"
         
         # Parse specific errors for the user UI
         last_error_str = str(last_error).lower()
@@ -130,19 +123,20 @@ class AIService:
             retry_seconds = int(retry_match.group(1))
 
         if "429" in last_error_str or "resourceexhausted" in last_error_str:
-            self._log_system_error(category, f"Rate Limit Exceeded (429): {str(last_error)}", {"primary": primary_model, "fallback": fallback_model, "traceback": traceback.format_exc() if last_error else None})
+            self._log_system_error(category, f"Rate Limit Exceeded (429): {str(last_error)}", {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
             raise AIServiceException("AI Model Rate Limit Exceeded", "rate_limit", retry_seconds)
             
         elif "401" in last_error_str or "403" in last_error_str or "permissiondenied" in last_error_str or "api_key_invalid" in last_error_str:
-            self._log_system_error(category, f"Authentication Error: {str(last_error)}", {"primary": primary_model, "fallback": fallback_model, "traceback": traceback.format_exc() if last_error else None})
+            self._log_system_error(category, f"Authentication Error: {str(last_error)}", {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
             raise AIServiceException("AI Model Authentication Failed", "auth_error")
             
         elif "503" in last_error_str or "504" in last_error_str or "serviceunavailable" in last_error_str or "deadlineexceeded" in last_error_str:
-            self._log_system_error(category, f"Service Unavailable: {str(last_error)}", {"primary": primary_model, "fallback": fallback_model, "traceback": traceback.format_exc() if last_error else None})
+            self._log_system_error(category, f"Service Unavailable: {str(last_error)}", {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
             raise AIServiceException("AI Model Service Unavailable", "service_error")
             
-        self._log_system_error(category, error_msg, {"primary": primary_model, "fallback": fallback_model, "traceback": traceback.format_exc() if last_error else None})
+        self._log_system_error(category, error_msg, {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
         raise last_error or Exception(error_msg)
+
 
     def _load_reference_context(self) -> str:
         """

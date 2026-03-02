@@ -6,11 +6,8 @@ import { useRouter } from 'next/navigation';
 
 interface ModelConfig {
     MODEL_VISION_PRIMARY: string;
-    MODEL_VISION_FALLBACK: string;
     MODEL_TEACHING_PRIMARY: string;
-    MODEL_TEACHING_FALLBACK: string;
     MODEL_UTILITY_PRIMARY: string;
-    MODEL_UTILITY_FALLBACK: string;
 }
 
 export default function SettingsPage() {
@@ -19,11 +16,8 @@ export default function SettingsPage() {
     const [availableModels, setAvailableModels] = useState<string[]>([]);
     const [config, setConfig] = useState<ModelConfig>({
         MODEL_VISION_PRIMARY: '',
-        MODEL_VISION_FALLBACK: '',
         MODEL_TEACHING_PRIMARY: '',
-        MODEL_TEACHING_FALLBACK: '',
-        MODEL_UTILITY_PRIMARY: '',
-        MODEL_UTILITY_FALLBACK: ''
+        MODEL_UTILITY_PRIMARY: ''
     });
     const [isLoading, setIsLoading] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
@@ -99,20 +93,17 @@ export default function SettingsPage() {
         {
             title: '扫描识别模型 (Vision)',
             desc: '用于图像理解和题目提取',
-            primaryKey: 'MODEL_VISION_PRIMARY' as keyof ModelConfig,
-            fallbackKey: 'MODEL_VISION_FALLBACK' as keyof ModelConfig
+            primaryKey: 'MODEL_VISION_PRIMARY' as keyof ModelConfig
         },
         {
             title: '深度教学模型 (Teaching)',
             desc: '用于作业批改和详细步骤推理',
-            primaryKey: 'MODEL_TEACHING_PRIMARY' as keyof ModelConfig,
-            fallbackKey: 'MODEL_TEACHING_FALLBACK' as keyof ModelConfig
+            primaryKey: 'MODEL_TEACHING_PRIMARY' as keyof ModelConfig
         },
         {
             title: '数据处理模型 (Utility)',
             desc: '用于生成相似题目等常规处理',
-            primaryKey: 'MODEL_UTILITY_PRIMARY' as keyof ModelConfig,
-            fallbackKey: 'MODEL_UTILITY_FALLBACK' as keyof ModelConfig
+            primaryKey: 'MODEL_UTILITY_PRIMARY' as keyof ModelConfig
         }
     ];
 
@@ -136,47 +127,49 @@ export default function SettingsPage() {
                 </div>
             </div>
 
+            <div className="mb-8 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                <div className="p-6 border-b border-gray-200 bg-gray-50 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                    <div>
+                        <h2 className="text-xl font-semibold text-gray-800">API 密钥池 (Token Manager)</h2>
+                        <p className="text-sm text-gray-500 mt-1">动态管理您的 Gemini API 密钥，系统将自动进行故障转移和限制处理</p>
+                    </div>
+                    <button
+                        onClick={() => router.push('/settings/tokens')}
+                        className="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none"
+                    >
+                        管理密钥 / Manage Keys
+                    </button>
+                </div>
+            </div>
+
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                 <div className="p-6 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
                     <div>
                         <h2 className="text-xl font-semibold text-gray-800">Gemini 模型配置</h2>
-                        <p className="text-sm text-gray-500 mt-1">为主力和备用情况选择合适的 API 模型</p>
+                        <p className="text-sm text-gray-500 mt-1">为各类任务指定专属运转的核心模型</p>
                     </div>
                 </div>
 
                 <div className="p-6 space-y-8">
                     {categories.map((cat, idx) => (
-                        <div key={idx} className="bg-gray-50 p-5 rounded-lg border border-gray-100">
-                            <h3 className="text-lg font-medium text-gray-900">{cat.title}</h3>
-                            <p className="text-sm text-gray-500 mb-4">{cat.desc}</p>
+                        <div key={idx} className="bg-gray-50 p-5 rounded-lg border border-gray-100 flex flex-col md:flex-row justify-between md:items-center gap-4">
+                            <div>
+                                <h3 className="text-lg font-medium text-gray-900">{cat.title}</h3>
+                                <p className="text-sm text-gray-500">{cat.desc}</p>
+                            </div>
 
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">主模型 (Primary Model)</label>
-                                    <select
-                                        value={config[cat.primaryKey] || ''}
-                                        onChange={(e) => handleSelectChange(cat.primaryKey, e.target.value)}
-                                        className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md shadow-sm border bg-white"
-                                    >
-                                        <option value="" disabled>--- 请选择 / Select ---</option>
-                                        {availableModels.map(m => (
-                                            <option key={m} value={m}>{m}</option>
-                                        ))}
-                                    </select>
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">备用模型 (Fallback Model)</label>
-                                    <select
-                                        value={config[cat.fallbackKey] || ''}
-                                        onChange={(e) => handleSelectChange(cat.fallbackKey, e.target.value)}
-                                        className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md shadow-sm border bg-white"
-                                    >
-                                        <option value="" disabled>--- 请选择 / Select ---</option>
-                                        {availableModels.map(m => (
-                                            <option key={m} value={m}>{m}</option>
-                                        ))}
-                                    </select>
-                                </div>
+                            <div className="w-full md:w-1/2">
+                                <label className="block text-sm font-medium text-gray-700 mb-1">执行模型 (Execution Model)</label>
+                                <select
+                                    value={config[cat.primaryKey] || ''}
+                                    onChange={(e) => handleSelectChange(cat.primaryKey, e.target.value)}
+                                    className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md shadow-sm border bg-white"
+                                >
+                                    <option value="" disabled>--- 请选择 / Select ---</option>
+                                    {availableModels.map(m => (
+                                        <option key={m} value={m}>{m}</option>
+                                    ))}
+                                </select>
                             </div>
                         </div>
                     ))}

@@ -140,3 +140,24 @@ class UserProgress(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", backref="progress_records")
+
+class GeminiToken(Base):
+    __tablename__ = "gemini_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), unique=True, nullable=False, index=True)
+    api_key = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=True)
+    error_count = Column(Integer, default=0)
+    cooldown_until = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class ModelConfig(Base):
+    __tablename__ = "model_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    role = Column(String(50), unique=True, nullable=False, index=True) # e.g. vision, teaching, utility
+    model_name = Column(String(100), nullable=False)
+    description = Column(String(255), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
