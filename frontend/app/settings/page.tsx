@@ -35,9 +35,10 @@ export default function SettingsPage() {
 
         const fetchSettings = async () => {
             try {
+                const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
                 const [modelsRes, configRes] = await Promise.all([
-                    fetch('/api/settings/models/available'),
-                    fetch('/api/settings/models/config')
+                    fetch(`${API_URL}/api/settings/models/available`),
+                    fetch(`${API_URL}/api/settings/models/config`)
                 ]);
 
                 if (modelsRes.ok && configRes.ok) {
@@ -66,7 +67,8 @@ export default function SettingsPage() {
         setIsSaving(true);
         setSaveMessage(null);
         try {
-            const response = await fetch('/api/settings/models/config', {
+            const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
+            const response = await fetch(`${API_URL}/api/settings/models/config`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(config)
