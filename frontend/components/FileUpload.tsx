@@ -13,12 +13,25 @@ interface FileUploadProps {
 export function FileUpload({ onUploadSuccess }: FileUploadProps) {
     const [isDragging, setIsDragging] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
+    const [activeInfo, setActiveInfo] = useState<{ model: string; keyName: string } | null>(null);
     const router = useRouter();
 
     const handleFile = async (file: File) => {
         if (!file) return;
 
         setIsUploading(true);
+
+        // Fetch active model/key info for transparency
+        try {
+            const infoRes = await fetchWithAuth('/api/settings/active-vision-info');
+            if (infoRes.ok) {
+                const info = await infoRes.json();
+                setActiveInfo(info);
+            }
+        } catch (e) {
+            console.error("Failed to fetch active vision info", e);
+        }
+
         const formData = new FormData();
         formData.append('file', file);
 
@@ -44,6 +57,7 @@ export function FileUpload({ onUploadSuccess }: FileUploadProps) {
             alert('Upload failed. Please try again.');
         } finally {
             setIsUploading(false);
+            setActiveInfo(null);
         }
     };
 
@@ -87,6 +101,12 @@ export function FileUpload({ onUploadSuccess }: FileUploadProps) {
                     <Loader2 className="w-10 h-10 text-blue-500 animate-spin" />
                     <p className="text-lg font-medium text-gray-700">AI is thinking...</p>
                     <p className="text-sm text-gray-500">Extracting content and analyzing difficulty</p>
+                    {activeInfo && (
+                        <div className="mt-2 px-3 py-1 bg-gray-50 rounded-full border border-gray-100 flex gap-4 text-[10px] text-gray-400 font-mono">
+                            <span>Model: {activeInfo.model}</span>
+                            <span>Key: {activeInfo.keyName}</span>
+                        </div>
+                    )}
                 </div>
             ) : (
                 <div className="flex flex-col items-center gap-4">

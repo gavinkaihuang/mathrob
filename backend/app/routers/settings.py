@@ -18,6 +18,8 @@ from ..database import get_db
 from ..models import ModelConfig as DBModelConfig
 from ..services.model_manager import model_manager
 from ..services.token_manager import token_manager
+from ..auth_deps import get_current_user
+from ..models import User
 
 import time
 
@@ -123,6 +125,28 @@ async def update_model_config(config: ModelConfig, db: Session = Depends(get_db)
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update configuration")
 
+@router.get("/settings/active-vision-info")
+async def get_active_vision_info(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """
+    Returns the currently active model and token name for vision tasks.
+    """
+    try:
+        model_name = model_manager.get_model_name(db, 'vision')
+        
+        try:
+            token_record = token_manager.get_available_token(db)
+            token_name = token_record.name
+        except Exception:
+            token_name = "Environment Key" if os.getenv("GEMINI_API_KEY") else "None Available"
+            
+        return {
+            "model": model_name,
+            "keyName": token_name
+        }
+    except Exception as e:
+        print(f"Error fetching active vision info: {e}")
+        return {"model": "Unknown", "keyName": "Unknown"}
+
 # Token Management CRUD
 
 from sqlalchemy.orm import Session
@@ -147,7 +171,7 @@ class TokenResponse(BaseModel):
     cooldown_until: Optional[datetime] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 @router.get("/settings/tokens", response_model=List[TokenResponse])
 def get_tokens(db: Session = Depends(get_db)):

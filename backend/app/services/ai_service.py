@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import json
 import re
 import glob
+from google.api_core import exceptions as google_exceptions
 
 load_dotenv()
 
@@ -48,10 +49,11 @@ class AIService:
         except Exception as e:
             print(f"Failed to write to system_logs: {e}")
 
-    async def call_gemini_with_fallback(self, category: str, prompt: str, image_path: str = None) -> str:
+    async def call_gemini_with_fallback(self, category: str, prompt: str, image_path: str = None) -> tuple[str, str]:
         """
         Routes request to the appropriate model based on configuration in the DB.
         Categories: 'vision', 'teaching', 'utility'
+        Returns: (response_text, used_model_name)
         """
         from .model_manager import model_manager
         
@@ -94,21 +96,41 @@ class AIService:
                 db_session.close()
                 return response.text, model_name
                 
-            except Exception as e:
-                last_error = e
-                last_error_str = str(last_error).lower()
+            except google_exceptions.ResourceExhausted as e:
+                # 429 - Rate limit / Quota exceeded
+                print(f"[WARNING] 触发限频或配额耗尽 (Token: {token_name}): {e}")
+                token_manager.report_token_error(db_session, token_id, token_name, str(e))
+                token_retry_count += 1
+                db_session.close()
+                continue
                 
-                # Check if error is related to quota or rate limit
-                if "429" in last_error_str or "resourceexhausted" in last_error_str or "quota" in last_error_str:
-                    print(f"[WARNING] 触发限频或配额耗尽 (Token: {token_name}): {e}")
-                    token_manager.report_token_error(db_session, token_id, token_name, str(e))
-                    token_retry_count += 1
-                    db_session.close()
-                    continue
-                else:
-                    print(f"[WARNING] 模型 {model_name} 调用失败。Error: {e}")
-                    db_session.close()
-                    break
+            except (google_exceptions.ServiceUnavailable, google_exceptions.InternalServerError, google_exceptions.DeadlineExceeded) as e:
+                # 5xx or transient timeout - Cooldown and retry
+                print(f"[WARNING] 服务暂时不可用 (Token: {token_name}): {e}")
+                token_manager.report_token_error(db_session, token_id, token_name, str(e))
+                token_retry_count += 1
+                db_session.close()
+                continue
+                
+            except (google_exceptions.NotFound, google_exceptions.InvalidArgument) as e:
+                # 404 or 400 - Model name typo or invalid param
+                # CRITICAL: Do NOT put token in cooldown, stop retrying immediately.
+                print(f"[CRITICAL] 模型配置错误！请检查 ModelConfig 表中的 model_name. Error: {e}")
+                db_session.close()
+                raise AIServiceException(f"模型配置错误，请检查模型名称: {str(e)}", "config_error")
+                
+            except (google_exceptions.Unauthenticated, google_exceptions.PermissionDenied) as e:
+                # 401 or 403 - Auth issues
+                print(f"[CRITICAL] API 认证失败 (Token: {token_name}): {e}")
+                db_session.close()
+                raise AIServiceException(f"API 密钥无效或无权访问模型: {str(e)}", "auth_error")
+
+            except Exception as e:
+                # Unknown error
+                print(f"[ERROR] 模型 {model_name} 调用发生未知错误: {e}")
+                db_session.close()
+                last_error = e
+                break
 
         # If we got here, all attempts failed
         error_msg = f"Model generation failed for {category}. Last error: {str(last_error)}"
@@ -122,15 +144,15 @@ class AIService:
         if retry_match:
             retry_seconds = int(retry_match.group(1))
 
-        if "429" in last_error_str or "resourceexhausted" in last_error_str:
+        if isinstance(last_error, google_exceptions.ResourceExhausted):
             self._log_system_error(category, f"Rate Limit Exceeded (429): {str(last_error)}", {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
             raise AIServiceException("AI Model Rate Limit Exceeded", "rate_limit", retry_seconds)
             
-        elif "401" in last_error_str or "403" in last_error_str or "permissiondenied" in last_error_str or "api_key_invalid" in last_error_str:
+        elif isinstance(last_error, (google_exceptions.Unauthenticated, google_exceptions.PermissionDenied)):
             self._log_system_error(category, f"Authentication Error: {str(last_error)}", {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
             raise AIServiceException("AI Model Authentication Failed", "auth_error")
             
-        elif "503" in last_error_str or "504" in last_error_str or "serviceunavailable" in last_error_str or "deadlineexceeded" in last_error_str:
+        elif isinstance(last_error, (google_exceptions.ServiceUnavailable, google_exceptions.DeadlineExceeded, google_exceptions.InternalServerError)):
             self._log_system_error(category, f"Service Unavailable: {str(last_error)}", {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
             raise AIServiceException("AI Model Service Unavailable", "service_error")
             
@@ -442,7 +464,7 @@ class AIService:
         
         try:
             # Route to TEACHING models
-            text = await self.call_gemini_with_fallback('teaching', prompt, solution_image_path)
+            text, used_model = await self.call_gemini_with_fallback('teaching', prompt, solution_image_path)
             
             text = re.sub(r'```json\n|\n```', '', text).strip()
             data = json.loads(text)

@@ -29,7 +29,7 @@ class ProblemSchema(BaseModel):
     ai_model: Optional[str] = None
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class KnowledgePointSchema(BaseModel):
     id: int
@@ -38,7 +38,7 @@ class KnowledgePointSchema(BaseModel):
     children: List['KnowledgePointSchema'] = []
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 # Problem Endpoints
 @router.get("/problems", response_model=List[ProblemSchema])
@@ -99,7 +99,7 @@ class KnowledgeNodeSchema(BaseModel):
     path: str
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 @router.get("/knowledge-nodes", response_model=List[KnowledgeNodeSchema])
 def get_knowledge_nodes(db: Session = Depends(get_db)):
