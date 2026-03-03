@@ -107,7 +107,7 @@ export default function HistoryPage() {
                                         {problem.current_mastery_level === 1 && <span className="text-2xl drop-shadow-sm">🔴</span>}
                                     </div>
                                     <img
-                                        src={`http://127.0.0.1:8000/static/${problem.image_path.split('/').pop()}`}
+                                        src={`/static/${problem.image_path.split('/').pop()}`}
                                         alt={`Problem ${problem.id}`}
                                         className="w-full h-full object-contain group-hover:scale-105 transition-transform duration-300"
                                         loading="lazy"
