@@ -3,20 +3,42 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Union
 from pydantic import BaseModel
 from ..database import get_db
-from ..models import Problem, KnowledgePoint, LearningRecord, SolutionAttempt, User, PracticeProblem, UserProgress
+from ..models import Problem, KnowledgePoint, LearningRecord, SolutionAttempt, User, PracticeProblem, UserProgress, APICallLog, SystemLog
 import os
-from datetime import datetime
-from ..services.ai_service import AIService
-
-UPLOAD_DIR = "backend/uploads"
-if not os.path.exists(UPLOAD_DIR):
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
 from datetime import datetime
 from ..services.ai_service import AIService, AIServiceException
 from ..auth_deps import get_current_user
 
+UPLOAD_DIR = "backend/uploads"
+if not os.path.exists(UPLOAD_DIR):
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 router = APIRouter(dependencies=[Depends(get_current_user)])
 ai_service = AIService()
+
+class SolutionAttemptSchema(BaseModel):
+    id: int
+    image_path: str
+    ai_model_used: Optional[str] = None
+    ai_score: Optional[float] = None
+    ai_evaluation: Optional[Union[dict, str]] = None
+    feedback_json: Optional[Union[dict, str]] = None
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class APICallLogSchema(BaseModel):
+    id: int
+    category: str
+    action_type: str
+    target_id: Optional[int] = None
+    model_used: str
+    token_name: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 class ProblemSchema(BaseModel):
     id: int
@@ -27,6 +49,7 @@ class ProblemSchema(BaseModel):
     created_at: datetime
     current_mastery_level: Optional[int] = None
     ai_model: Optional[str] = None
+    solution_attempts: List[SolutionAttemptSchema] = []
     
     class Config:
         from_attributes = True
@@ -348,7 +371,8 @@ async def generate_similar_practice(problem_id: int, db: Session = Depends(get_d
             original_latex=latex, 
             knowledge_points=kps, 
             difficulty=difficulty,
-            knowledge_path_name=knowledge_path_name
+            knowledge_path_name=knowledge_path_name,
+            target_id=problem.id
         )
     except AIServiceException as e:
         status_code = 429 if e.error_type == "rate_limit" else 401 if e.error_type == "auth_error" else 503
@@ -438,7 +462,8 @@ async def submit_practice_solution(
             
     # Call AI Teaching Model to analyze the handwritten solution vs reference
     try:
-        feedback = await ai_service.analyze_solution(problem_latex, standard_solution, file_location)
+        feedback_data = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id)
+        feedback = feedback_data["feedback_json"]
     except AIServiceException as e:
         status_code = 429 if e.error_type == "rate_limit" else 401 if e.error_type == "auth_error" else 503
         raise HTTPException(
@@ -452,7 +477,7 @@ async def submit_practice_solution(
     # Return directly, no need to clutter DB with solution attempts for practice
     return {"feedback_json": feedback}
 
-@router.post("/problems/{problem_id}/submit_solution")
+@router.post("/problems/{problem_id}/submit_solution", response_model=SolutionAttemptSchema)
 async def submit_solution(
     problem_id: int, 
     file: UploadFile = File(...), 
@@ -485,7 +510,9 @@ async def submit_solution(
             
     # Call AI
     try:
-        feedback = await ai_service.analyze_solution(problem_latex, standard_solution, file_location)
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id)
+        feedback = ai_response["feedback_json"]
+        used_model = ai_response["ai_model"]
     except AIServiceException as e:
         status_code = 429 if e.error_type == "rate_limit" else 401 if e.error_type == "auth_error" else 503
         raise HTTPException(
@@ -495,12 +522,16 @@ async def submit_solution(
     except Exception as e:
         print(f"AI Analysis failed: {e}")
         feedback = {"score": 0, "error": str(e)}
+        used_model = "error"
         
     # Save Attempt
     attempt = SolutionAttempt(
         problem_id=problem_id,
         user_id=current_user.id,
         image_path=safe_filename,
+        ai_model_used=used_model,
+        ai_score=feedback.get("score") if isinstance(feedback, dict) else None,
+        ai_evaluation=feedback,
         feedback_json=feedback
     )
     db.add(attempt)
@@ -508,6 +539,79 @@ async def submit_solution(
     db.refresh(attempt)
     
     return attempt
+
+
+@router.delete("/solution-attempts/{attempt_id}")
+async def delete_solution_attempt(attempt_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    attempt = db.query(SolutionAttempt).filter(SolutionAttempt.id == attempt_id, SolutionAttempt.user_id == current_user.id).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Solution attempt not found")
+    
+    # Optional: Delete file from disk
+    try:
+        if attempt.image_path:
+            # Check if it's a relative path from UPLOAD_DIR
+            file_path = os.path.join(UPLOAD_DIR, attempt.image_path)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+    except Exception as e:
+        print(f"Failed to delete file: {e}")
+
+    db.delete(attempt)
+    db.commit()
+    return {"message": "Solution attempt deleted"}
+
+
+@router.post("/solution-attempts/{attempt_id}/reanalyze", response_model=SolutionAttemptSchema)
+async def reanalyze_solution_attempt(attempt_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    attempt = db.query(SolutionAttempt).filter(SolutionAttempt.id == attempt_id, SolutionAttempt.user_id == current_user.id).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Solution attempt not found")
+    
+    problem = attempt.problem
+    if not problem:
+        raise HTTPException(status_code=404, detail="Problem not found")
+
+    file_location = os.path.join(UPLOAD_DIR, attempt.image_path)
+    if not os.path.exists(file_location):
+        raise HTTPException(status_code=404, detail="Original image file not found on server")
+
+    # Prepare context for AI
+    problem_latex = problem.latex_content or "N/A"
+    standard_solution = "N/A"
+    
+    if problem.ai_analysis:
+        if isinstance(problem.ai_analysis, dict):
+            standard_solution = problem.ai_analysis.get("solution", "N/A")
+        elif isinstance(problem.ai_analysis, str):
+            standard_solution = problem.ai_analysis
+
+    # Call AI
+    try:
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem.id)
+        feedback = ai_response["feedback_json"]
+        used_model = ai_response["ai_model"]
+    except AIServiceException as e:
+        status_code = 429 if e.error_type == "rate_limit" else 401 if e.error_type == "auth_error" else 503
+        raise HTTPException(
+            status_code=status_code, 
+            detail={"message": e.args[0], "error_type": e.error_type, "retry_seconds": e.retry_seconds}
+        )
+    except Exception as e:
+        print(f"AI Re-analysis failed: {e}")
+        feedback = {"score": 0, "error": str(e)}
+        used_model = "error"
+
+    # Update Attempt
+    attempt.feedback_json = feedback
+    attempt.ai_model_used = used_model
+    attempt.ai_score = feedback.get("score") if isinstance(feedback, dict) else None
+    attempt.ai_evaluation = feedback
+    db.commit()
+    db.refresh(attempt)
+    
+    return attempt
+
 
 # --- Reports ---
 from ..services.report_service import ReportService
@@ -659,3 +763,23 @@ def batch_update_progress(request: ProgressUpdateRequest, db: Session = Depends(
     db.commit()
     
     return {"status": "success", "learned_count": len(new_records)}
+@router.get("/logs/calls", response_model=List[APICallLogSchema])
+def get_call_logs(limit: int = 100, db: Session = Depends(get_db)):
+    """Fetch recent successful AI call logs."""
+    return db.query(APICallLog).order_by(APICallLog.created_at.desc()).limit(limit).all()
+
+@router.get("/logs/system", response_model=List[dict])
+def get_system_logs(limit: int = 100, db: Session = Depends(get_db)):
+    """Fetch recent system error logs."""
+    logs = db.query(SystemLog).order_by(SystemLog.created_at.desc()).limit(limit).all()
+    # Convert to dict for easier frontend handling if needed, though Schema is better
+    return [
+        {
+            "id": l.id,
+            "level": l.level,
+            "category": l.category,
+            "message": l.message,
+            "details": l.details,
+            "created_at": l.created_at
+        } for l in logs
+    ]

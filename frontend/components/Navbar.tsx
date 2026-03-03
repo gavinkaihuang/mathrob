@@ -3,7 +3,16 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { LogOut } from 'lucide-react';
+import {
+    LogOut,
+    Home,
+    BookOpen,
+    History,
+    BarChart3,
+    Settings,
+    Terminal,
+    Users
+} from 'lucide-react';
 import { SystemErrorBanner } from './SystemErrorBanner';
 
 export function Navbar() {
@@ -11,16 +20,16 @@ export function Navbar() {
     const { isAuthenticated, logout, isAdmin } = useAuth();
 
     const links = [
-        { href: '/', label: '首页' },
-        { href: '/review', label: '今日复习' },
-        { href: '/history', label: '错题本' },
-        { href: '/reports', label: '周报' },
-        { href: '/settings', label: '系统设置' },
-        { href: '/syslogs', label: '运行日志' },
+        { href: '/', label: '首页', icon: <Home className="w-4 h-4" /> },
+        { href: '/review', label: '今日复习', icon: <BookOpen className="w-4 h-4" /> },
+        { href: '/history', label: '错题本', icon: <History className="w-4 h-4" /> },
+        { href: '/reports', label: '周报', icon: <BarChart3 className="w-4 h-4" /> },
+        { href: '/settings', label: '系统设置', icon: <Settings className="w-4 h-4" /> },
+        { href: '/syslogs', label: '运行日志', icon: <Terminal className="w-4 h-4" /> },
     ];
 
     if (isAdmin) {
-        links.push({ href: '/users', label: '用户管理' });
+        links.push({ href: '/users', label: '用户管理', icon: <Users className="w-4 h-4" /> });
     }
 
     if (!isAuthenticated) return null; // Don't show navbar if not logged in (e.g. login page)
@@ -40,17 +49,23 @@ export function Navbar() {
                             </div>
                             <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
                                 {links.map((link) => {
-                                    const isActive = pathname === link.href;
+                                    const isActive = link.href === '/'
+                                        ? pathname === '/'
+                                        : pathname.startsWith(link.href) || (link.href === '/history' && pathname.startsWith('/problems'));
+
                                     return (
                                         <Link
                                             key={link.href}
                                             href={link.href}
-                                            className={`inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium ${isActive
-                                                ? 'border-indigo-500 text-gray-900'
-                                                : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700'
+                                            className={`inline-flex items-center px-4 py-2 text-sm font-semibold transition-all duration-200 rounded-xl my-2 ${isActive
+                                                ? 'bg-indigo-50 text-indigo-600 shadow-sm shadow-indigo-100/50'
+                                                : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
                                                 }`}
                                         >
-                                            {link.label}
+                                            <div className="flex items-center gap-2">
+                                                {link.icon}
+                                                <span>{link.label}</span>
+                                            </div>
                                         </Link>
                                     );
                                 })}

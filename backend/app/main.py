@@ -40,7 +40,7 @@ app = FastAPI(title="MathRob API", version="0.1.0", lifespan=lifespan)
 # CORS Configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"], # Allow Frontend
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"], # Allow Frontend
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

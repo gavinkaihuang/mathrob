@@ -1,15 +1,19 @@
 "use client";
 
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
-import { Loader2, AlertCircle, ChevronDown, ChevronUp } from 'lucide-react';
+import { Loader2, AlertCircle, ChevronDown, ChevronUp, Activity, ShieldAlert, Cpu, Key } from 'lucide-react';
 import { fetchWithAuth } from '@/utils/api';
+
+type TabType = 'errors' | 'calls';
 
 export default function SysLogsPage() {
     const { isAuthenticated } = useAuth();
     const router = useRouter();
-    const [logs, setLogs] = useState<any[]>([]);
+    const [activeTab, setActiveTab] = useState<TabType>('errors');
+    const [errorLogs, setErrorLogs] = useState<any[]>([]);
+    const [callLogs, setCallLogs] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [expandedRows, setExpandedRows] = useState<{ [key: number]: boolean }>({});
 
@@ -19,12 +23,21 @@ export default function SysLogsPage() {
             return;
         }
 
-        async function fetchLogs() {
+        async function fetchAllLogs() {
+            setLoading(true);
             try {
-                const res = await fetchWithAuth('/api/logs/system?limit=100');
-                if (res.ok) {
-                    const data = await res.json();
-                    setLogs(data);
+                const [errRes, callRes] = await Promise.all([
+                    fetchWithAuth('/api/logs/system?limit=100'),
+                    fetchWithAuth('/api/logs/calls?limit=100')
+                ]);
+
+                if (errRes.ok) {
+                    const data = await errRes.json();
+                    setErrorLogs(data);
+                }
+                if (callRes.ok) {
+                    const data = await callRes.json();
+                    setCallLogs(data);
                 }
             } catch (error) {
                 console.error("Failed to fetch logs:", error);
@@ -33,7 +46,7 @@ export default function SysLogsPage() {
             }
         }
 
-        fetchLogs();
+        fetchAllLogs();
     }, [isAuthenticated, router]);
 
     const toggleRow = (id: number) => {
@@ -41,6 +54,26 @@ export default function SysLogsPage() {
             ...prev,
             [id]: !prev[id]
         }));
+    };
+
+    const getActionLabel = (action: string, targetId?: number) => {
+        const labels: { [key: string]: string } = {
+            'PARSE_PROBLEM': '解析题目',
+            'GRADE_SOLUTION': '批改解答',
+            'GENERATE_SIMILAR': '生成变式'
+        };
+        const base = labels[action] || action;
+        return targetId ? `${base} #${targetId}` : base;
+    };
+
+    const getCategoryStyles = (category: string) => {
+        const styles: { [key: string]: string } = {
+            'VISION': 'bg-blue-100 text-blue-700 border-blue-200',
+            'TEACHING': 'bg-purple-100 text-purple-700 border-purple-200',
+            'UTILITY': 'bg-emerald-100 text-emerald-700 border-emerald-200',
+            'SYSTEM': 'bg-gray-100 text-gray-700 border-gray-200'
+        };
+        return styles[category.toUpperCase()] || styles['SYSTEM'];
     };
 
     if (loading) {
@@ -54,93 +87,173 @@ export default function SysLogsPage() {
     return (
         <div className="min-h-screen bg-gray-50 py-8">
             <div className="max-w-[1500px] mx-auto px-4 sm:px-6 lg:px-8">
-                <div className="mb-8 flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                {/* Header */}
+                <div className="mb-8 flex justify-between items-center bg-white p-8 rounded-3xl shadow-sm border border-gray-100">
                     <div>
-                        <h1 className="text-2xl font-bold tracking-tight text-gray-900 flex items-center gap-2">
-                            <AlertCircle className="text-red-500" />
-                            系统运行日志
+                        <h1 className="text-3xl font-black tracking-tight text-gray-900 flex items-center gap-3">
+                            <Activity className="text-indigo-600 w-8 h-8" />
+                            日志管理中心
                         </h1>
-                        <p className="mt-2 text-sm text-gray-500 max-w-2xl">
-                            这里记录了后台 AI 大模型调用过程中发生的底层错误或异常，包括解析失败、Token 消耗完毕或网络连接超时。
+                        <p className="mt-2 text-sm text-gray-500 font-medium">
+                            全站运行监控。包含 AI 模型调用埋点记录与底层系统异常排查。
                         </p>
                     </div>
                 </div>
 
-                <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-                    <div className="overflow-x-auto">
-                        <table className="min-w-full divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
-                                <tr>
-                                    <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-16">
+                {/* Tab Switcher */}
+                <div className="flex p-1.5 bg-gray-200/50 backdrop-blur-sm rounded-2xl w-fit mb-6 border border-gray-200/50">
+                    <button
+                        onClick={() => setActiveTab('errors')}
+                        className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-200 ${activeTab === 'errors'
+                            ? 'bg-white text-red-600 shadow-sm'
+                            : 'text-gray-500 hover:text-gray-700'
+                            }`}
+                    >
+                        <ShieldAlert className="w-4 h-4" />
+                        异常日志 (Error Logs)
+                        {errorLogs.length > 0 && (
+                            <span className="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full ml-1 animate-pulse">
+                                {errorLogs.length}
+                            </span>
+                        )}
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('calls')}
+                        className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-200 ${activeTab === 'calls'
+                            ? 'bg-white text-indigo-600 shadow-sm'
+                            : 'text-gray-500 hover:text-gray-700'
+                            }`}
+                    >
+                        <Cpu className="w-4 h-4" />
+                        调用记录 (Call Logs)
+                        <span className="bg-indigo-100 text-indigo-600 text-[10px] px-1.5 py-0.5 rounded-full ml-1">
+                            {callLogs.length}
+                        </span>
+                    </button>
+                </div>
 
-                                    </th>
-                                    <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-24">
-                                        ID
-                                    </th>
-                                    <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-32">
-                                        Category
-                                    </th>
-                                    <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-40">
-                                        Time
-                                    </th>
-                                    <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider flex-grow">
-                                        Message
-                                    </th>
-                                </tr>
-                            </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
-                                {logs.length === 0 ? (
+                {/* Content Area */}
+                <div className="bg-white rounded-3xl shadow-xl shadow-gray-200/50 border border-gray-100 overflow-hidden">
+                    <div className="overflow-x-auto">
+                        {activeTab === 'errors' ? (
+                            <table className="min-w-full divide-y divide-gray-100">
+                                <thead className="bg-gray-50/80">
                                     <tr>
-                                        <td colSpan={5} className="px-6 py-12 text-center text-sm text-gray-500">
-                                            🎉 恭喜！当前系统运行良好，没有任何报错记录。
-                                        </td>
+                                        <th className="px-6 py-4 text-left text-[11px] font-black text-gray-400 uppercase tracking-widest w-12 text-center">+/-</th>
+                                        <th className="px-6 py-4 text-left text-[11px] font-black text-gray-400 uppercase tracking-widest w-24">ID</th>
+                                        <th className="px-6 py-4 text-left text-[11px] font-black text-gray-400 uppercase tracking-widest w-32">Category</th>
+                                        <th className="px-6 py-4 text-left text-[11px] font-black text-gray-400 uppercase tracking-widest w-44 text-center">Time</th>
+                                        <th className="px-6 py-4 text-left text-[11px] font-black text-gray-400 uppercase tracking-widest">Error Message</th>
                                     </tr>
-                                ) : (
-                                    logs.map((log) => (
-                                        <div key={log.id} style={{ display: 'contents' }}>
-                                            <tr
-                                                className={`hover:bg-gray-50 transition-colors cursor-pointer ${log.level === 'CRITICAL' ? 'bg-red-50/10' : ''}`}
-                                                onClick={() => toggleRow(log.id)}
-                                            >
-                                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-400">
-                                                    {expandedRows[log.id] ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
-                                                </td>
-                                                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                                                    #{log.id}
-                                                </td>
-                                                <td className="px-6 py-4 whitespace-nowrap">
-                                                    <span className="px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-indigo-100 text-indigo-800 uppercase tracking-wide">
-                                                        {log.category || 'SYSTEM'}
-                                                    </span>
-                                                </td>
-                                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                                    {new Date(log.created_at).toLocaleString('zh-CN', {
-                                                        year: 'numeric', month: '2-digit', day: '2-digit',
-                                                        hour: '2-digit', minute: '2-digit', second: '2-digit'
-                                                    })}
-                                                </td>
-                                                <td className="px-6 py-4 text-sm text-gray-900 truncate max-w-xl">
-                                                    {log.message}
-                                                </td>
-                                            </tr>
-                                            {/* Expandable Details Row */}
-                                            {expandedRows[log.id] && (
-                                                <tr className="bg-gray-50/50">
-                                                    <td colSpan={5} className="px-6 py-6 border-l-4 border-red-500">
-                                                        <div className="pl-4">
-                                                            <h4 className="text-sm font-semibold text-gray-900 mb-2">Error Details Payload</h4>
-                                                            <pre className="text-xs text-gray-300 bg-gray-900 p-4 rounded-xl overflow-x-auto shadow-inner w-full whitespace-pre-wrap">
-                                                                {log.details ? JSON.stringify(log.details, null, 2) : "No details provided."}
-                                                            </pre>
-                                                        </div>
+                                </thead>
+                                <tbody className="divide-y divide-gray-50">
+                                    {errorLogs.length === 0 ? (
+                                        <tr>
+                                            <td colSpan={5} className="px-6 py-20 text-center">
+                                                <div className="flex flex-col items-center opacity-40">
+                                                    <span className="text-4xl mb-4">🛡️</span>
+                                                    <p className="text-sm font-bold text-gray-500">当前没有记录到的系统异常</p>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    ) : (
+                                        errorLogs.map((log) => (
+                                            <React.Fragment key={log.id}>
+                                                <tr
+                                                    className={`group hover:bg-gray-50 transition-all cursor-pointer ${expandedRows[log.id] ? 'bg-red-50/30' : ''}`}
+                                                    onClick={() => toggleRow(log.id)}
+                                                >
+                                                    <td className="px-6 py-4 text-center text-gray-300">
+                                                        {expandedRows[log.id] ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                                                    </td>
+                                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-400">#{log.id}</td>
+                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                        <span className={`px-2.5 py-1 text-[10px] font-black rounded-lg border uppercase tracking-tight ${getCategoryStyles(log.category)}`}>
+                                                            {log.category || 'SYSTEM'}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-500 font-medium text-center">
+                                                        {new Date(log.created_at).toLocaleString('zh-CN')}
+                                                    </td>
+                                                    <td className="px-6 py-4 text-sm text-gray-700 font-semibold truncate max-w-xl">
+                                                        {log.message}
                                                     </td>
                                                 </tr>
-                                            )}
-                                        </div>
-                                    ))
-                                )}
-                            </tbody>
-                        </table>
+                                                {expandedRows[log.id] && (
+                                                    <tr className="bg-gray-900">
+                                                        <td colSpan={5} className="px-12 py-8">
+                                                            <div className="space-y-4">
+                                                                <div className="flex items-center gap-2 text-red-400 text-[10px] font-black uppercase tracking-widest">
+                                                                    <ShieldAlert className="w-3 h-3" /> Traceback Payload
+                                                                </div>
+                                                                <pre className="text-[11px] text-gray-400 font-mono overflow-x-auto whitespace-pre-wrap leading-relaxed select-all">
+                                                                    {log.details ? JSON.stringify(log.details, null, 2) : "No details provided."}
+                                                                </pre>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                )}
+                                            </React.Fragment>
+                                        ))
+                                    )}
+                                </tbody>
+                            </table>
+                        ) : (
+                            /* Call Logs Table */
+                            <table className="min-w-full divide-y divide-gray-100">
+                                <thead className="bg-gray-50/80">
+                                    <tr>
+                                        <th className="px-6 py-4 text-left text-[11px] font-black text-gray-400 uppercase tracking-widest w-44 text-center">Time</th>
+                                        <th className="px-6 py-4 text-left text-[11px] font-black text-gray-400 uppercase tracking-widest w-32">Category</th>
+                                        <th className="px-6 py-4 text-left text-[11px] font-black text-gray-400 uppercase tracking-widest w-48">Action</th>
+                                        <th className="px-6 py-4 text-left text-[11px] font-black text-gray-400 uppercase tracking-widest w-48">Model Used</th>
+                                        <th className="px-6 py-4 text-left text-[11px] font-black text-gray-400 uppercase tracking-widest">Token Pair</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-50">
+                                    {callLogs.length === 0 ? (
+                                        <tr>
+                                            <td colSpan={5} className="px-6 py-20 text-center">
+                                                <div className="flex flex-col items-center opacity-40">
+                                                    <span className="text-4xl mb-4">📡</span>
+                                                    <p className="text-sm font-bold text-gray-500">尚无成功的 AI 调用记录</p>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    ) : (
+                                        callLogs.map((log) => (
+                                            <tr key={log.id} className="hover:bg-gray-50 transition-all">
+                                                <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-500 font-medium text-center">
+                                                    {new Date(log.created_at).toLocaleString('zh-CN')}
+                                                </td>
+                                                <td className="px-6 py-4 whitespace-nowrap">
+                                                    <span className={`px-2.5 py-1 text-[10px] font-black rounded-lg border uppercase tracking-tight ${getCategoryStyles(log.category)}`}>
+                                                        {log.category}
+                                                    </span>
+                                                </td>
+                                                <td className="px-6 py-4 whitespace-nowrap">
+                                                    <div className="text-sm font-bold text-gray-800">
+                                                        {getActionLabel(log.action_type, log.target_id)}
+                                                    </div>
+                                                </td>
+                                                <td className="px-6 py-4 whitespace-nowrap">
+                                                    <div className="flex items-center gap-2 text-xs font-semibold text-gray-600 bg-gray-100 px-2 py-1 rounded-md w-fit">
+                                                        <Cpu className="w-3 h-3 text-indigo-500" />
+                                                        {log.model_used}
+                                                    </div>
+                                                </td>
+                                                <td className="px-6 py-4 whitespace-nowrap">
+                                                    <div className="flex items-center gap-2 text-xs font-semibold text-gray-400">
+                                                        <Key className="w-3 h-3" />
+                                                        {log.token_name || 'N/A'}
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        ))
+                                    )}
+                                </tbody>
+                            </table>
+                        )}
                     </div>
                 </div>
             </div>

@@ -13,7 +13,7 @@ from pydantic import BaseModel, ValidationError
 from typing import List, Dict, Any, Optional
 import traceback
 from ..database import SessionLocal
-from ..models import SystemLog
+from ..models import SystemLog, APICallLog
 from .token_manager import token_manager
 
 class AIAnalysisResponse(BaseModel):
@@ -48,6 +48,24 @@ class AIService:
             db.close()
         except Exception as e:
             print(f"Failed to write to system_logs: {e}")
+
+    def _log_api_call(self, category: str, action_type: str, model_used: str, token_name: str, target_id: int = None):
+        """Records a successful AI model call."""
+        try:
+            db = SessionLocal()
+            log_entry = APICallLog(
+                category=category.upper(),
+                action_type=action_type,
+                target_id=target_id,
+                model_used=model_used,
+                token_name=token_name
+            )
+            db.add(log_entry)
+            db.commit()
+            db.close()
+            print(f"[LOG] Recorded {action_type} for model {model_used} using {token_name}")
+        except Exception as e:
+            print(f"Failed to write to api_call_logs: {e}")
 
     async def call_gemini_with_fallback(self, category: str, prompt: str, image_path: str = None) -> tuple[str, str]:
         """
@@ -94,7 +112,7 @@ class AIService:
                 )
                 
                 db_session.close()
-                return response.text, model_name
+                return response.text, model_name, token_name
                 
             except google_exceptions.ResourceExhausted as e:
                 # 429 - Rate limit / Quota exceeded
@@ -287,7 +305,7 @@ class AIService:
 
         try:
             # Route to VISION models
-            text, used_model = await self.call_gemini_with_fallback('vision', prompt, image_path)
+            text, used_model, used_token = await self.call_gemini_with_fallback('vision', prompt, image_path)
             
             # Clean up markdown
             text = re.sub(r'```json\n|\n```', '', text).strip()
@@ -296,6 +314,9 @@ class AIService:
             # Parse JSON - Use a more robust approach
             try:
                 data = json.loads(text)
+                
+                # Log success
+                self._log_api_call("VISION", "PARSE_PROBLEM", used_model, used_token)
             except json.JSONDecodeError as je:
                 print(f"Standard JSON parse failed, trying robust mode: {je}")
                 # Try to handle common LaTeX backslash issues by allowing control characters
@@ -347,7 +368,7 @@ class AIService:
         text = re.sub(r'(?<!\$)\\\\underline\\{.*?\\}', r'$\g<0>$', text)
         return text
 
-    async def generate_similar_problems(self, original_latex: str, knowledge_points: List[str] = [], difficulty: int = 1, knowledge_path_name: str = "相关知识点") -> Dict[str, Any]:
+    async def generate_similar_problems(self, original_latex: str, knowledge_points: List[str] = [], difficulty: int = 1, knowledge_path_name: str = "相关知识点", target_id: int = None) -> Dict[str, Any]:
         """
         Generates 2 similar practice problems with rich context and rigorous prompt.
         """
@@ -395,7 +416,7 @@ class AIService:
         
         try:
             # Route to UTILITY/REASONING models
-            text, used_model = await self.call_gemini_with_fallback('utility', prompt)
+            text, used_model, used_token = await self.call_gemini_with_fallback('utility', prompt)
             
             # Clean and parse
             text = re.sub(r'```json\n|\n```', '', text).strip()
@@ -420,6 +441,9 @@ class AIService:
                 if 'latex' in item:
                     item['latex'] = self._fix_latex(item['latex'])
             
+            # Log success
+            self._log_api_call("UTILITY", "GENERATE_SIMILAR", used_model, used_token, target_id=target_id)
+            
             return {
                 "problems": problems,
                 "ai_model": used_model
@@ -432,43 +456,60 @@ class AIService:
             self._log_system_error("utility", f"Practice Generation Failed: {str(e)}", {"traceback": traceback.format_exc()})
             return {"problems": [], "error": str(e)}
 
-    async def analyze_solution(self, problem_latex: str, standard_solution: str, solution_image_path: str):
+    async def analyze_solution(self, problem_latex: str, standard_solution: str, solution_image_path: str, target_id: int = None):
         """
         Analyzes a student's handwritten solution against the problem and standard solution.
         Uses TEACHING models (high reasoning capability).
         """
         prompt = f"""
-        Role: Expert Math Tutor.
-        Task: Check the student's solution image against the problem and standard solution.
+        # Role
+        你是一位资深的高中数学阅卷专家。请根据提供的标准答案，对学生上传的解答截图进行严格批改。
+
+        # Context
+        - Problem (LaTeX): {problem_latex}
+        - Standard Solution (Reference): {standard_solution}
         
-        Problem (LaTeX):
-        {problem_latex}
-        
-        Standard Solution (Reference):
-        {standard_solution}
-        
-        Requirements:
-        1. Identify the student's logical steps.
-        2. Detect any calculation or logic errors.
-        3. Provide constructive suggestions.
-        4. Score the solution (0-100).
-        
-        Output strictly as JSON:
+        # Grading Instructions (STRICT)
+        在输出 JSON 格式的反馈时，除了检查数学逻辑和计算结果外，**必须额外增加对卷面和答题规范的点评**。
+        请重点评估以下维度，以适应严格的标准化考试要求：
+        1. **卷面整洁度**：字迹是否清晰、是否有严重涂抹破坏阅读。
+        2. **答题规范性**：是否按规范写了“解/证明”、数学符号书写是否标准、推导步骤是否跳跃或缺失。
+
+        # Output Format
+        Return strictly valid JSON with the following fields:
+        - score: int (0-100)
+        - logic_gaps: list of strings (Issues with mathematical logic)
+        - calculation_errors: list of strings (Arithmetic or algebraic errors)
+        - formatting_feedback: string (Assessment of handwriting, neatness, and formal presentation)
+        - suggestions: markdown string (General advice for improvement)
+
         {{
             "score": int,
             "logic_gaps": ["gap1", "gap2"],
             "calculation_errors": ["error1"],
+            "formatting_feedback": "对卷面整洁度和规范性的详细点评",
             "suggestions": "Markdown string with feedback"
         }}
         """
         
         try:
             # Route to TEACHING models
-            text, used_model = await self.call_gemini_with_fallback('teaching', prompt, solution_image_path)
+            text, used_model, used_token = await self.call_gemini_with_fallback('teaching', prompt, solution_image_path)
             
             text = re.sub(r'```json\n|\n```', '', text).strip()
             data = json.loads(text)
-            return data
+            
+            # Post-process to ensure formatting_feedback exists
+            if "formatting_feedback" not in data:
+                data["formatting_feedback"] = "未检测到明显的卷面规范问题。"
+            
+            # Log success
+            self._log_api_call("TEACHING", "GRADE_SOLUTION", used_model, used_token, target_id=target_id)
+                
+            return {
+                "feedback_json": data,
+                "ai_model": used_model
+            }
             
         except AIServiceException as e:
             raise e

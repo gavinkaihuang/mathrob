@@ -102,7 +102,10 @@ class SolutionAttempt(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     problem_id = Column(Integer, ForeignKey("problems.id"))
     image_path = Column(String, nullable=False)
-    feedback_json = Column(JSON, nullable=True) # { score: int, logic_gaps: [], calculation_errors: [], suggestions: [] }
+    ai_model_used = Column(String(100), nullable=True) # The model that performed this specific grading
+    ai_score = Column(Float, nullable=True) # System-given score
+    ai_evaluation = Column(JSON, nullable=True) # Detailed correction evaluation (copy of feedback_json or subset)
+    feedback_json = Column(JSON, nullable=True) # { score: int, logic_gaps: [], calculation_errors: [], suggestions: [], formatting_feedback: str }
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", backref="solution_attempts")
@@ -161,3 +164,14 @@ class ModelConfig(Base):
     model_name = Column(String(100), nullable=False)
     description = Column(String(255), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class APICallLog(Base):
+    __tablename__ = "api_call_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    category = Column(String(50), nullable=False) # e.g. vision, teaching, utility
+    action_type = Column(String(50), nullable=False) # e.g. PARSE_PROBLEM, GRADE_SOLUTION
+    target_id = Column(Integer, nullable=True) # e.g. problem_id
+    model_used = Column(String(100), nullable=False)
+    token_name = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

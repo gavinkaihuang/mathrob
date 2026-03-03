@@ -2,7 +2,7 @@
 
 import { useEffect, useState, use } from 'react';
 import { LatexRenderer } from '@/components/LatexRenderer';
-import { Loader2, ArrowLeft } from 'lucide-react';
+import { Loader2, ArrowLeft, ZoomIn, Eye, ChevronDown, ChevronUp, Clock, Trash2, RefreshCw } from 'lucide-react';
 import Link from 'next/link';
 import { fetchWithAuth } from '../../../utils/api';
 import Image from 'next/image';
@@ -33,6 +33,11 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
     const [solutionFile, setSolutionFile] = useState<File | null>(null);
     const [isAnalyzingSolution, setIsAnalyzingSolution] = useState(false);
     const [analysisResult, setAnalysisResult] = useState<any>(null);
+    const [currentAttemptModel, setCurrentAttemptModel] = useState<string | null>(null);
+
+    // Zoom Modal State
+    const [isZoomModalOpen, setIsZoomModalOpen] = useState(false);
+    const [zoomImageSrc, setZoomImageSrc] = useState<string>("");
 
     useEffect(() => {
         async function fetchProblem() {
@@ -43,6 +48,12 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
                     setProblem(data);
                     if (data.current_mastery_level) {
                         setMasteryLevel(data.current_mastery_level);
+                    }
+                    // Auto-load latest attempt results if available
+                    if (data.solution_attempts && data.solution_attempts.length > 0) {
+                        const latest = data.solution_attempts[data.solution_attempts.length - 1];
+                        setAnalysisResult(latest.feedback_json);
+                        setCurrentAttemptModel(latest.ai_model_used);
                     }
                 }
             } catch (error) {
@@ -68,6 +79,56 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
         fetchPracticeProblems();
     }, [id]);
 
+    const handleDeleteAttempt = async (attemptId: number) => {
+        if (!confirm('Are you sure you want to delete this attempt?')) return;
+
+        try {
+            const res = await fetchWithAuth(`/api/solution-attempts/${attemptId}`, {
+                method: 'DELETE',
+            });
+            if (res.ok) {
+                // Remove attempt from local state
+                setProblem((prev: any) => ({
+                    ...prev,
+                    solution_attempts: prev.solution_attempts.filter((a: any) => a.id !== attemptId)
+                }));
+            }
+        } catch (error) {
+            console.error('Failed to delete attempt:', error);
+        }
+    };
+
+    const handleReanalyzeAttempt = async (attemptId: number) => {
+        setIsAnalyzingSolution(true);
+        try {
+            const res = await fetchWithAuth(`/api/solution-attempts/${attemptId}/reanalyze`, {
+                method: 'POST',
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setAnalysisResult(data.feedback_json);
+                setCurrentAttemptModel(data.ai_model_used);
+                // Update local problem state
+                setProblem((prev: any) => ({
+                    ...prev,
+                    solution_attempts: prev.solution_attempts.map((a: any) => a.id === attemptId ? data : a)
+                }));
+                // Scroll to result
+                setTimeout(() => {
+                    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+                }, 100);
+            } else {
+                const errData = await res.json().catch(() => ({}));
+                alert("Re-analysis failed: " + (errData.detail?.message || errData.detail || "Server error"));
+            }
+        } catch (error) {
+            console.error('Failed to re-analyze attempt:', error);
+            alert("Error connecting to server.");
+        } finally {
+            setIsAnalyzingSolution(false);
+        }
+    };
+
     if (loading) {
         return (
             <div className="flex h-screen items-center justify-center">
@@ -81,27 +142,31 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
     }
 
     return (
-        <div className="min-h-screen bg-gray-50 p-8">
-            <div className="max-w-[1800px] mx-auto space-y-6">
-                <Link href="/" className="inline-flex items-center text-sm text-gray-500 hover:text-gray-900">
+        <div className="min-h-screen bg-gray-50 p-4 md:p-8">
+            <div className="max-w-[1600px] mx-auto space-y-6">
+                <Link href="/" className="inline-flex items-center text-sm text-gray-500 hover:text-gray-900 transition-colors">
                     <ArrowLeft className="w-4 h-4 mr-2" />
                     Back to Upload
                 </Link>
 
-                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-                    <div className="p-6 border-b border-gray-100 flex justify-between items-center">
-                        <div className="flex items-center gap-3">
-                            <h1 className="text-2xl font-bold text-gray-900">Problem Analysis #{problem.id}</h1>
+                {/* Header Card */}
+                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 flex flex-col md:flex-row justify-between items-center gap-4">
+                    <div className="flex items-center gap-3 w-full">
+                        <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-bold shadow-lg shadow-indigo-200 shrink-0">
+                            #{problem.id}
+                        </div>
+                        <div className="flex-grow">
+                            <h1 className="text-xl font-bold text-gray-900 leading-tight">Problem Analysis</h1>
                             {problem.ai_model && (
-                                <span className="px-2.5 py-1 text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-100 rounded-full flex items-center gap-1 shadow-sm">
-                                    <span className="text-[10px]">🤖</span> {problem.ai_model}
+                                <span className="text-[10px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-100 rounded-full px-2 py-0.5 inline-flex items-center gap-1 mt-0.5">
+                                    🤖 {problem.ai_model}
                                 </span>
                             )}
                         </div>
                         <button
                             onClick={handleReanalyze}
                             disabled={isReanalyzing}
-                            className="inline-flex items-center px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50 transition-colors text-sm font-medium border border-gray-200"
+                            className="inline-flex items-center px-4 py-2 bg-gray-50 text-gray-700 rounded-xl hover:bg-gray-100 disabled:opacity-50 transition-all text-sm font-medium border border-gray-200 shadow-sm active:scale-95 whitespace-nowrap"
                         >
                             {isReanalyzing ? (
                                 <>
@@ -109,429 +174,484 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
                                     Re-analyzing...
                                 </>
                             ) : (
-                                <>
-                                    ✨ 重新分析 (Re-analyze)
-                                </>
+                                <>✨ 重新分析 (Re-analyze)</>
+                            )}
+                        </button>
+                    </div>
+                </div>
+
+                {/* Main Content Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
+
+                    {/* Left Column: Problem Context (col-span-12 md:col-span-5) */}
+                    <div className="md:col-span-12 lg:col-span-5 space-y-6 lg:sticky lg:top-8">
+                        {/* Original Scan Card */}
+                        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                            <div className="p-4 border-b border-gray-50 flex items-center gap-2">
+                                <Eye className="w-4 h-4 text-indigo-500" />
+                                <h2 className="font-bold text-gray-700 text-sm">Original Scan</h2>
+                            </div>
+                            <div className="aspect-[3/4] bg-gray-50 relative group">
+                                {problem.image_path ? (
+                                    <img
+                                        src={`http://127.0.0.1:8000/static/${problem.image_path.split('/').pop()}`}
+                                        alt="Problem Scan"
+                                        className="w-full h-full object-contain cursor-zoom-in"
+                                        onClick={() => {
+                                            setZoomImageSrc(`http://127.0.0.1:8000/static/${problem.image_path.split('/').pop()}`);
+                                            setIsZoomModalOpen(true);
+                                        }}
+                                    />
+                                ) : (
+                                    <div className="flex items-center justify-center h-full text-gray-400">No Image</div>
+                                )}
+                                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/5 transition-colors pointer-events-none flex items-center justify-center opacity-0 group-hover:opacity-100">
+                                    <ZoomIn className="text-white w-8 h-8 drop-shadow-md" />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* OCR Recognition Card */}
+                        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                            <div className="p-4 border-b border-gray-50 flex items-center gap-2">
+                                <span className="text-indigo-500 font-bold">📝</span>
+                                <h2 className="font-bold text-gray-700 text-sm">识别题干 (OCR Result)</h2>
+                            </div>
+                            <div className="p-5 bg-gray-50/50">
+                                <div className="p-4 bg-white rounded-xl border border-gray-100 text-lg shadow-inner overflow-x-auto min-h-[100px] flex items-center">
+                                    <LatexRenderer content={problem.latex_content || "No LaTeX detected"} block />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Right Column: Analysis & Actions (col-span-12 md:col-span-7) */}
+                    <div className="md:col-span-12 lg:col-span-7 space-y-6">
+
+                        {/* Analysis Card */}
+                        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                            <div className="p-6 border-b border-gray-50 flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-indigo-500 font-bold">📊</span>
+                                    <h2 className="font-bold text-gray-800">题目分析 (Analysis)</h2>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                    <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider mr-1">Difficulty</span>
+                                    <div className="flex gap-1">
+                                        {[1, 2, 3, 4, 5].map(v => (
+                                            <div key={v} className={`w-1.5 h-4 rounded-full ${v <= (problem.difficulty || 0) ? 'bg-indigo-500 shadow-sm shadow-indigo-200' : 'bg-gray-100'}`} />
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="p-6 space-y-8">
+                                {/* Knowledge Points */}
+                                {((problem.knowledge_points && problem.knowledge_points.length > 0) || (problem.ai_analysis?.knowledge_points && problem.ai_analysis.knowledge_points.length > 0)) && (
+                                    <div className="flex flex-wrap gap-2">
+                                        {(problem.knowledge_points || problem.ai_analysis?.knowledge_points || []).map((kp: string, i: number) => (
+                                            <span key={i} className="px-3 py-1 bg-indigo-50 text-indigo-700 rounded-lg text-xs font-bold border border-indigo-100 shadow-sm">
+                                                #{kp}
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {/* Thinking Process Accordion */}
+                                <div className="border border-gray-100 rounded-2xl overflow-hidden group transition-all hover:border-indigo-100 hover:shadow-md">
+                                    <button
+                                        onClick={() => setShowHint(!showHint)}
+                                        className="w-full p-4 flex items-center justify-between bg-white hover:bg-indigo-50/30 transition-colors"
+                                    >
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-8 h-8 rounded-lg bg-yellow-100 flex items-center justify-center text-yellow-600">
+                                                <span className="text-sm">💡</span>
+                                            </div>
+                                            <span className="font-bold text-gray-700 text-sm">解题思路 (Thinking Process)</span>
+                                        </div>
+                                        {showHint ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
+                                    </button>
+                                    {showHint && (
+                                        <div className="p-5 bg-yellow-50/30 border-t border-yellow-50 animate-in slide-in-from-top-2 duration-300">
+                                            <div className="text-gray-800 leading-relaxed text-[15px]">
+                                                <LatexRenderer content={problem.ai_analysis?.thinking_process || "No hint available"} block />
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Detailed Solution Accordion */}
+                                <div className="border border-gray-100 rounded-2xl overflow-hidden group transition-all hover:border-indigo-100 hover:shadow-md">
+                                    <button
+                                        onClick={() => setShowSolution(!showSolution)}
+                                        className="w-full p-4 flex items-center justify-between bg-white hover:bg-indigo-50/30 transition-colors"
+                                    >
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-8 h-8 rounded-lg bg-blue-100 flex items-center justify-center text-blue-600">
+                                                <span className="text-sm">📝</span>
+                                            </div>
+                                            <span className="font-bold text-gray-700 text-sm">详细解答 (Detailed Solution)</span>
+                                        </div>
+                                        {showSolution ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
+                                    </button>
+                                    {showSolution && (
+                                        <div className="p-5 bg-blue-50/30 border-t border-blue-50 animate-in slide-in-from-top-2 duration-300">
+                                            <div className="text-gray-800 leading-relaxed text-[15px]">
+                                                <LatexRenderer content={problem.ai_analysis?.solution || "No solution available"} block />
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Error Log (if any) */}
+                                {problem.ai_analysis && problem.ai_analysis.error && (
+                                    <div className="bg-red-50 border border-red-100 p-4 rounded-xl">
+                                        <div className="flex justify-between items-center mb-2">
+                                            <h3 className="text-red-800 text-xs font-bold uppercase tracking-wider">⚠️ Analysis Error</h3>
+                                            <button
+                                                onClick={() => setShowErrorLog(!showErrorLog)}
+                                                className="text-[10px] bg-red-100 text-red-700 px-2 py-1 rounded font-bold"
+                                            >
+                                                {showErrorLog ? 'HIDE LOG' : 'SHOW LOG'}
+                                            </button>
+                                        </div>
+                                        {showErrorLog && (
+                                            <pre className="mt-2 p-3 bg-red-900/5 text-red-800 text-[10px] font-mono whitespace-pre-wrap rounded-lg">
+                                                {problem.ai_analysis.error}
+                                            </pre>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* User Answer Zone Card */}
+                        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                            <div className="p-6 border-b border-gray-50">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-indigo-500 font-bold">📸</span>
+                                    <h2 className="font-bold text-gray-800">上传作答 (Upload Your Work)</h2>
+                                </div>
+                            </div>
+
+                            <div className="p-6 space-y-6">
+                                <div className="flex flex-col md:flex-row gap-4">
+                                    <label className="flex-grow group">
+                                        <div className="relative flex items-center justify-center border-2 border-dashed border-gray-200 rounded-2xl p-4 transition-all group-hover:border-indigo-300 group-hover:bg-indigo-50/30 cursor-pointer">
+                                            <div className="flex flex-col items-center">
+                                                <span className="text-xs font-bold text-gray-500 group-hover:text-indigo-600">
+                                                    {solutionFile ? solutionFile.name : "Choose a photo of your answer"}
+                                                </span>
+                                            </div>
+                                            <input
+                                                type="file"
+                                                accept="image/*"
+                                                onChange={(e) => setSolutionFile(e.target.files?.[0] || null)}
+                                                className="absolute inset-0 opacity-0 cursor-pointer"
+                                            />
+                                        </div>
+                                    </label>
+                                    <button
+                                        onClick={handleSolutionUpload}
+                                        disabled={!solutionFile || isAnalyzingSolution}
+                                        className="bg-indigo-600 text-white rounded-2xl px-8 py-4 font-bold text-sm shadow-lg shadow-indigo-100 hover:bg-indigo-700 disabled:opacity-50 transition-all active:scale-95 shrink-0"
+                                    >
+                                        {isAnalyzingSolution ? (
+                                            <span className="flex items-center gap-2">
+                                                <Loader2 className="w-4 h-4 animate-spin" /> Batch Processing...
+                                            </span>
+                                        ) : "Analyze My Answer"}
+                                    </button>
+                                </div>
+
+                                {/* Past Attempts Thumbnail List */}
+                                {problem.solution_attempts && problem.solution_attempts.length > 0 && (
+                                    <div className="space-y-4 pt-4 border-t border-gray-50">
+                                        <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">My Recent Work</p>
+                                        <div className="flex flex-wrap gap-4">
+                                            {problem.solution_attempts.slice(-3).reverse().map((attempt: any, idx: number) => (
+                                                <div
+                                                    key={idx}
+                                                    className="w-24 h-32 bg-gray-50 rounded-xl border border-gray-200 overflow-hidden relative cursor-pointer hover:ring-2 hover:ring-indigo-500 transition-all group shadow-sm"
+                                                    onClick={() => {
+                                                        setZoomImageSrc(`http://127.0.0.1:8000/static/${attempt.image_path}`);
+                                                        setAnalysisResult(attempt.feedback_json);
+                                                        setCurrentAttemptModel(attempt.ai_model_used);
+                                                        setIsZoomModalOpen(true);
+                                                    }}
+                                                >
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            handleDeleteAttempt(attempt.id);
+                                                        }}
+                                                        className="absolute top-1 right-1 z-20 p-1.5 bg-white/80 backdrop-blur-sm rounded-lg border border-red-100 text-red-500 opacity-0 group-hover:opacity-100 hover:bg-red-500 hover:text-white transition-all shadow-sm"
+                                                        title="Delete attempt"
+                                                    >
+                                                        <Trash2 className="w-3.5 h-3.5" />
+                                                    </button>
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            handleReanalyzeAttempt(attempt.id);
+                                                        }}
+                                                        className="absolute top-1 left-1 z-20 p-1.5 bg-white/80 backdrop-blur-sm rounded-lg border border-indigo-100 text-indigo-500 opacity-0 group-hover:opacity-100 hover:bg-indigo-500 hover:text-white transition-all shadow-sm"
+                                                        title="Re-analyze attempt"
+                                                    >
+                                                        <RefreshCw className={`w-3.5 h-3.5 ${isAnalyzingSolution ? 'animate-spin' : ''}`} />
+                                                    </button>
+                                                    <img
+                                                        src={`http://127.0.0.1:8000/static/${attempt.image_path}`}
+                                                        alt="Past attempt"
+                                                        className="w-full h-full object-cover"
+                                                    />
+                                                    <div className="absolute inset-x-0 bottom-0 bg-black/40 p-1 text-[8px] text-white text-center font-bold">
+                                                        Attempt #{problem.solution_attempts.length - idx}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Feedback Result Card */}
+                                {analysisResult && (
+                                    <div className="bg-gray-900 rounded-3xl p-6 text-white shadow-2xl animate-in zoom-in-95 duration-500">
+                                        <div className="flex justify-between items-center mb-6">
+                                            <div className="flex items-center gap-3">
+                                                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-xl font-black ${analysisResult.score >= 80 ? 'bg-green-500' : analysisResult.score >= 60 ? 'bg-yellow-500' : 'bg-red-500 shadow-red-900/50'}`}>
+                                                    {analysisResult.score}
+                                                </div>
+                                                <div>
+                                                    <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Score Assessment</p>
+                                                    <p className="text-lg font-bold">AI Grading Report</p>
+                                                </div>
+                                            </div>
+                                            {currentAttemptModel && (
+                                                <span className="text-[9px] font-medium text-gray-500 bg-white/5 border border-white/10 rounded-lg px-2 py-1">
+                                                    Evaluated by {currentAttemptModel}
+                                                </span>
+                                            )}
+                                        </div>
+
+                                        <div className="space-y-4">
+                                            {analysisResult.logic_gaps?.length > 0 && (
+                                                <div className="bg-white/10 rounded-2xl p-4 border border-white/5">
+                                                    <p className="text-red-400 text-[10px] font-black uppercase mb-2">Internal Logic Issues</p>
+                                                    <ul className="space-y-2">
+                                                        {analysisResult.logic_gaps.map((gap: string, i: number) => (
+                                                            <li key={i} className="text-sm flex gap-2">
+                                                                <span className="text-red-500">✕</span> {gap}
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            )}
+
+                                            {/* Formatting Feedback Section */}
+                                            {analysisResult.formatting_feedback && (
+                                                <div className="bg-orange-500/10 rounded-2xl p-4 border border-orange-500/20">
+                                                    <p className="text-orange-400 text-[10px] font-black uppercase mb-2">卷面与规范诊断 (Formatting & Presentation)</p>
+                                                    <div className="text-sm text-gray-200 leading-relaxed">
+                                                        <span className="text-orange-400 mr-2">🖋️</span>
+                                                        {analysisResult.formatting_feedback}
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {analysisResult.calculation_errors?.length > 0 && (
+                                                <div className="bg-white/10 rounded-2xl p-4 border border-white/5">
+                                                    <p className="text-orange-400 text-[10px] font-black uppercase mb-2">Calculation Errors</p>
+                                                    <ul className="space-y-2">
+                                                        {analysisResult.calculation_errors.map((err: string, i: number) => (
+                                                            <li key={i} className="text-sm flex gap-2">
+                                                                <span className="text-orange-500">⚠</span> {err}
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            )}
+                                            {analysisResult.suggestions && (
+                                                <div className="bg-indigo-500/20 rounded-2xl p-4 border border-indigo-500/20">
+                                                    <p className="text-indigo-300 text-[10px] font-black uppercase mb-2">Learning Path Suggestion</p>
+                                                    <div className="text-sm italic text-gray-200">
+                                                        <LatexRenderer content={analysisResult.suggestions} block={false} />
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Mastery Confirmation Card */}
+                        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 flex items-center justify-between">
+                            <h2 className="font-bold text-gray-800 text-sm">掌握程度 (Mastery Status)</h2>
+                            <div className="flex gap-2">
+                                {[
+                                    { level: 1, label: '完全不会', emoji: '🔴' },
+                                    { level: 2, label: '半知半解', emoji: '🟡' },
+                                    { level: 3, label: '完全掌握', emoji: '🟢' }
+                                ].map((item) => (
+                                    <button
+                                        key={item.level}
+                                        onClick={() => updateMastery(item.level)}
+                                        className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 border ${masteryLevel === item.level
+                                            ? 'bg-indigo-600 border-indigo-600 text-white shadow-lg shadow-indigo-100'
+                                            : 'bg-white border-gray-100 text-gray-600 hover:bg-gray-50'
+                                            }`}
+                                    >
+                                        <span>{item.emoji}</span>
+                                        {item.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Similar Practice Section (Full Width Bottom) */}
+                <div className="bg-indigo-900 rounded-[2.5rem] p-8 md:p-12 text-white overflow-hidden relative group">
+                    <div className="absolute top-0 right-0 w-96 h-96 bg-indigo-500 rounded-full blur-[120px] opacity-20 -mr-48 -mt-48"></div>
+                    <div className="absolute bottom-0 left-0 w-64 h-64 bg-purple-500 rounded-full blur-[100px] opacity-10 -ml-32 -mb-32"></div>
+
+                    <div className="relative z-10 flex flex-col md:flex-row justify-between items-center gap-8 mb-16">
+                        <div className="space-y-4 text-center md:text-left">
+                            <h2 className="text-4xl font-black tracking-tight leading-none bg-gradient-to-r from-white to-indigo-300 bg-clip-text text-transparent">同类练习 (Similar Practice)</h2>
+                            <p className="text-indigo-200 font-medium text-lg">Generate AI-powered variations to reinforce your understanding.</p>
+                        </div>
+                        <button
+                            onClick={generatePractice}
+                            disabled={generatingPractice}
+                            className="bg-white text-indigo-900 px-10 py-5 rounded-[1.5rem] font-black text-sm hover:bg-indigo-50 transition-all shadow-2xl shadow-indigo-950/50 disabled:opacity-50 active:scale-95 flex items-center gap-3 border-4 border-white/20"
+                        >
+                            {generatingPractice ? (
+                                <><Loader2 className="w-5 h-5 animate-spin" /> Batch Generating...</>
+                            ) : (
+                                <><span className="text-lg">🔄</span> 生成挑战 (Generate Practice)</>
                             )}
                         </button>
                     </div>
 
-                    <div className="grid md:grid-cols-[1fr_2fr] gap-8 p-6">
-                        {/* Left: Image */}
-                        <div className="space-y-4">
-                            <h2 className="font-semibold text-gray-700">Original Scan</h2>
-                            <div className="aspect-[3/4] bg-gray-100 rounded-lg overflow-hidden relative border border-gray-200">
-                                {problem.image_path ? (
-                                    // eslint-disable-next-line @next/next/no-img-element
-                                    <img
-                                        src={`http://localhost:8000/static/${problem.image_path.split('/').pop()}`}
-                                        alt="Problem Scan"
-                                        className="w-full h-full object-contain"
-                                    />
-                                ) : (
-                                    <div className="flex items-center justify-center h-full text-gray-400">
-                                        No Image Available
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-
-                        {/* Right: Analysis */}
-                        <div className="space-y-6">
-                            {/* Error Banner */}
-                            {problem.ai_analysis && problem.ai_analysis.error && (
-                                <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-r-lg">
-                                    <div className="flex justify-between items-start">
-                                        <div>
-                                            <h3 className="text-red-800 font-medium flex items-center gap-2">
-                                                <span>⚠️</span> 分析失败 (Analysis Failed)
-                                            </h3>
-                                            <p className="text-sm text-red-600 mt-1">AI 引擎在处理此图片时遇到了问题。您可以重试，或查看详细日志报告给管理员。</p>
-                                        </div>
-                                        <button
-                                            onClick={() => setShowErrorLog(!showErrorLog)}
-                                            className="text-sm bg-red-100 text-red-700 hover:bg-red-200 px-3 py-1.5 rounded-md transition-colors"
-                                        >
-                                            {showErrorLog ? '隐藏日志 (Hide Log)' : '查看日志 (View Log)'}
-                                        </button>
-                                    </div>
-                                    {showErrorLog && (
-                                        <div className="mt-4 bg-red-950 text-red-200 p-3 rounded-md text-xs font-mono overflow-auto max-h-64 break-words">
-                                            {problem.ai_analysis.error}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-
-                            <div>
-                                <h2 className="font-semibold text-gray-700 mb-2">Recognized LaTeX</h2>
-                                <div className="p-4 bg-gray-50 rounded-lg text-lg overflow-x-auto">
-                                    <LatexRenderer content={problem.latex_content || "No LaTeX detected"} block />
-                                </div>
-                            </div>
-
-                            {/* Hint Section */}
-                            <div className="space-y-2">
-                                <div className="flex justify-between items-center">
-                                    <h2 className="font-semibold text-gray-700">Hint & Analysis</h2>
-                                    <button
-                                        onClick={() => setShowHint(!showHint)}
-                                        className={`px-4 py-2 rounded-lg transition-colors text-sm font-medium ${!showHint
-                                            ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200'
-                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                            }`}
-                                    >
-                                        {!showHint ? '💡 获取思路提示 (Get Hint)' : '🙈 隐藏思路提示 (Hide Hint)'}
-                                    </button>
-                                </div>
-                                {showHint && (
-                                    <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-100 animate-in fade-in slide-in-from-top-2 duration-300">
-                                        <p className="text-sm text-yellow-800 font-semibold mb-2">解题思路 (Thinking Process):</p>
-                                        <div className="text-gray-800">
-                                            <LatexRenderer content={problem.ai_analysis?.thinking_process || "No hint available"} block />
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* Full Solution Section */}
-                            <div className="space-y-2">
-                                <div className="flex justify-between items-center">
-                                    <h2 className="font-semibold text-gray-700">Detailed Solution</h2>
-                                    <button
-                                        onClick={() => setShowSolution(!showSolution)}
-                                        className={`px-4 py-2 rounded-lg transition-colors text-sm font-medium ${!showSolution
-                                            ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
-                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                            }`}
-                                    >
-                                        {!showSolution ? '📝 查看详细过程 (View Solution)' : '🙈 隐藏详细过程 (Hide Solution)'}
-                                    </button>
-                                </div>
-                                {showSolution && (
-                                    <div className="p-4 bg-blue-50 rounded-lg border border-blue-100 animate-in fade-in slide-in-from-top-2 duration-300">
-                                        <div className="text-gray-800">
-                                            <LatexRenderer content={problem.ai_analysis?.solution || "No solution available"} block />
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* Knowledge Points */}
-                            {/* Knowledge Points */}
-                            {((problem.knowledge_points && problem.knowledge_points.length > 0) || (problem.ai_analysis?.knowledge_points && problem.ai_analysis.knowledge_points.length > 0)) && (
-                                <div>
-                                    <h2 className="font-semibold text-gray-700 mb-2">Knowledge Points</h2>
-                                    <div className="flex flex-wrap gap-2">
-                                        {(problem.knowledge_points || problem.ai_analysis?.knowledge_points || []).map((kp: string, i: number) => (
-                                            <span key={i} className="px-3 py-1 bg-indigo-50 text-indigo-700 rounded-full text-sm font-medium border border-indigo-100">
-                                                {kp}
-                                            </span>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-                            <div className="flex items-center gap-2">
-                                <span className="text-sm font-medium text-gray-500">Difficulty:</span>
-                                <div className="flex gap-1">
-                                    {[1, 2, 3, 4, 5].map(v => (
-                                        <div key={v} className={`w-2 h-6 rounded-full ${v <= (problem.difficulty || 0) ? 'bg-blue-500' : 'bg-gray-200'}`} />
-                                    ))}
-                                </div>
-                            </div>
-
-                            {/* Solution Analysis Section */}
-                            <div className="mt-8 pt-6 border-t border-gray-100">
-                                <h2 className="font-semibold text-gray-700 mb-4 flex items-center gap-2">
-                                    📸 Upload Your Answer (AI Correction)
-                                    <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">New</span>
-                                </h2>
-
-                                <div className="space-y-4">
-                                    <div className="flex gap-4">
-                                        <input
-                                            type="file"
-                                            accept="image/*"
-                                            onChange={(e) => setSolutionFile(e.target.files?.[0] || null)}
-                                            className="block w-full text-sm text-gray-500
-                                                file:mr-4 file:py-2 file:px-4
-                                                file:rounded-full file:border-0
-                                                file:text-sm file:font-semibold
-                                                file:bg-indigo-50 file:text-indigo-700
-                                                hover:file:bg-indigo-100"
-                                        />
-                                        <button
-                                            onClick={handleSolutionUpload}
-                                            disabled={!solutionFile || isAnalyzingSolution}
-                                            className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors text-sm font-medium whitespace-nowrap"
-                                        >
-                                            {isAnalyzingSolution ? (
-                                                <div className="flex items-center gap-2">
-                                                    <Loader2 className="w-4 h-4 animate-spin" />
-                                                    Checking...
-                                                </div>
-                                            ) : (
-                                                "Analyze"
-                                            )}
-                                        </button>
-                                    </div>
-
-                                    {analysisResult && (
-                                        <div className="bg-white border rounded-xl overflow-hidden animate-in fade-in slide-in-from-top-4">
-                                            <div className="bg-indigo-50 p-4 border-b border-indigo-100 flex justify-between items-center">
-                                                <h3 className="font-bold text-indigo-900">Analysis Result</h3>
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-sm text-indigo-600">Score:</span>
-                                                    <span className={`text-xl font-bold ${analysisResult.score >= 80 ? 'text-green-600' : analysisResult.score >= 60 ? 'text-yellow-600' : 'text-red-600'}`}>
-                                                        {analysisResult.score}/100
-                                                    </span>
-                                                </div>
+                    {practiceProblems.length > 0 && (
+                        <div className="grid md:grid-cols-2 lg:grid-cols-2 gap-10 relative z-10">
+                            {practiceProblems.map((p: any, idx: number) => {
+                                let aiData = typeof p.ai_analysis === 'string' ? JSON.parse(p.ai_analysis) : (p.ai_analysis || {});
+                                return (
+                                    <div key={p.id || idx} className="bg-white/10 backdrop-blur-xl border border-white/10 rounded-[2rem] p-8 shadow-2xl group/card hover:bg-white/15 transition-all">
+                                        <div className="flex justify-between items-start mb-8">
+                                            <div className="bg-white text-indigo-900 px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider">
+                                                Practice Task #{idx + 1}
                                             </div>
-
-                                            <div className="p-4 space-y-4">
-                                                {analysisResult.logic_gaps && analysisResult.logic_gaps.length > 0 && (
-                                                    <div>
-                                                        <h4 className="flex items-center gap-2 text-sm font-semibold text-red-700 mb-2">
-                                                            🚫 Logic Gaps / Issues
-                                                        </h4>
-                                                        <ul className="list-disc list-inside text-sm text-gray-700 space-y-1 bg-red-50 p-3 rounded-lg">
-                                                            {analysisResult.logic_gaps.map((gap: string, i: number) => (
-                                                                <li key={i}>{gap}</li>
-                                                            ))}
-                                                        </ul>
-                                                    </div>
-                                                )}
-
-                                                {analysisResult.calculation_errors && analysisResult.calculation_errors.length > 0 && (
-                                                    <div>
-                                                        <h4 className="flex items-center gap-2 text-sm font-semibold text-orange-700 mb-2">
-                                                            ⚠️ Calculation Errors
-                                                        </h4>
-                                                        <ul className="list-disc list-inside text-sm text-gray-700 space-y-1 bg-orange-50 p-3 rounded-lg">
-                                                            {analysisResult.calculation_errors.map((err: string, i: number) => (
-                                                                <li key={i}>{err}</li>
-                                                            ))}
-                                                        </ul>
-                                                    </div>
-                                                )}
-
-                                                {analysisResult.suggestions && (
-                                                    <div>
-                                                        <h4 className="flex items-center gap-2 text-sm font-semibold text-blue-700 mb-2">
-                                                            💡 Suggestions
-                                                        </h4>
-                                                        <div className="text-sm text-gray-700 bg-blue-50 p-3 rounded-lg">
-                                                            <LatexRenderer content={analysisResult.suggestions} block={false} />
-                                                        </div>
-                                                    </div>
-                                                )}
-
-                                                {/* If perfect */}
-                                                {analysisResult.score === 100 && (
-                                                    <div className="text-center p-4 text-green-600 font-medium">
-                                                        🎉 Excellent work! No errors found.
-                                                    </div>
-                                                )}
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-
-                            {/* Mastery Buttons */}
-                            <div className="mt-8 pt-6 border-t border-gray-100">
-                                <h2 className="font-semibold text-gray-700 mb-4 text-center">Mastery Confirmation</h2>
-                                <div className="grid grid-cols-3 gap-4">
-                                    <button
-                                        onClick={() => updateMastery(1)}
-                                        className={`flex flex-col items-center justify-center p-3 rounded-xl border transition-all duration-200 ${masteryLevel === 1
-                                            ? 'bg-red-100 border-red-500 ring-2 ring-red-200 scale-[1.02] shadow-sm'
-                                            : 'bg-red-50 border-red-100 text-red-600 hover:bg-red-100'
-                                            }`}
-                                    >
-                                        <span className="text-2xl mb-1">🔴</span>
-                                        <span className={`font-medium text-sm ${masteryLevel === 1 ? 'text-red-800 font-bold' : ''}`}>完全不会</span>
-                                        <span className="text-xs opacity-75">Not Understood</span>
-                                    </button>
-                                    <button
-                                        onClick={() => updateMastery(2)}
-                                        className={`flex flex-col items-center justify-center p-3 rounded-xl border transition-all duration-200 ${masteryLevel === 2
-                                            ? 'bg-yellow-100 border-yellow-500 ring-2 ring-yellow-200 scale-[1.02] shadow-sm'
-                                            : 'bg-yellow-50 border-yellow-100 text-yellow-700 hover:bg-yellow-100'
-                                            }`}
-                                    >
-                                        <span className="text-2xl mb-1">🟡</span>
-                                        <span className={`font-medium text-sm ${masteryLevel === 2 ? 'text-yellow-900 font-bold' : ''}`}>半知半解</span>
-                                        <span className="text-xs opacity-75">Half Understood</span>
-                                    </button>
-                                    <button
-                                        onClick={() => updateMastery(3)}
-                                        className={`flex flex-col items-center justify-center p-3 rounded-xl border transition-all duration-200 ${masteryLevel === 3
-                                            ? 'bg-green-100 border-green-500 ring-2 ring-green-200 scale-[1.02] shadow-sm'
-                                            : 'bg-green-50 border-green-100 text-green-700 hover:bg-green-100'
-                                            }`}
-                                    >
-                                        <span className="text-2xl mb-1">🟢</span>
-                                        <span className={`font-medium text-sm ${masteryLevel === 3 ? 'text-green-900 font-bold' : ''}`}>完全掌握</span>
-                                        <span className="text-xs opacity-75">Mastered</span>
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-
-
-                    </div>
-                </div>
-            </div>
-
-            {/* Practice Section - Moved outside grid for full width */}
-            <div className="p-6 border-t border-gray-100 bg-gray-50/50">
-                <div className="flex justify-between items-center mb-6">
-                    <h2 className="text-xl font-bold text-gray-800">Similar Practice</h2>
-                    <button
-                        onClick={generatePractice}
-                        disabled={generatingPractice}
-                        className="inline-flex items-center px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors text-sm font-medium shadow-sm"
-                    >
-                        {generatingPractice ? (
-                            <>
-                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                                Generating...
-                            </>
-                        ) : (
-                            <>
-                                🔄 生成同类练习 (Generate Practice)
-                            </>
-                        )}
-                    </button>
-                </div>
-
-                {practiceProblems.length > 0 && (
-                    <div className="grid md:grid-cols-2 gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                        {practiceProblems.map((p, idx) => {
-                            // Extract ai_analysis safely handling if it's stringified
-                            let aiData = p.ai_analysis || {};
-                            if (typeof aiData === 'string') {
-                                try { aiData = JSON.parse(aiData); } catch (e) { }
-                            }
-
-                            return (
-                                <div key={p.id || idx} className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm flex flex-col">
-                                    <div className="flex justify-between items-center mb-3">
-                                        <span className="text-xs font-bold text-indigo-500 uppercase tracking-wider">Practice #{idx + 1}</span>
-                                        {p.id && <span className="text-[10px] text-gray-400">ID: {p.id}</span>}
-                                    </div>
-
-                                    {/* Problem Content */}
-                                    <div className="mb-4 text-gray-800 flex-grow">
-                                        <LatexRenderer content={p.latex_content || p.latex || ""} block />
-                                    </div>
-
-                                    {/* Input Area */}
-                                    <div className="space-y-3 mt-4">
-
-                                        <div className="flex justify-between items-center">
                                             <div className="flex gap-2">
-                                                <label className="px-3 py-1.5 bg-gray-100 text-gray-600 rounded-md text-xs font-medium hover:bg-gray-200 cursor-pointer flex items-center gap-1 transition-colors">
-                                                    📸 {practiceFiles[p.id || idx] ? 'Photo Selected' : 'Photo'}
+                                                <button
+                                                    onClick={() => setShowPracticeSolutions({ ...showPracticeSolutions, [p.id || idx]: !showPracticeSolutions[p.id || idx] })}
+                                                    className="w-10 h-10 bg-white/10 hover:bg-white/20 rounded-xl flex items-center justify-center transition-all"
+                                                    title="Show Solution"
+                                                >
+                                                    <Eye className="w-5 h-5" />
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-white rounded-[1.5rem] p-6 text-gray-900 min-h-[120px] flex items-center justify-center mb-8 shadow-inner ring-1 ring-black/5">
+                                            <div className="text-xl">
+                                                <LatexRenderer content={p.latex_content || p.latex || ""} block />
+                                            </div>
+                                        </div>
+
+                                        <div className="space-y-4">
+                                            <div className="flex gap-3">
+                                                <label className="flex-grow bg-white text-indigo-900 px-6 py-4 rounded-2xl cursor-pointer hover:bg-indigo-50 transition-all flex items-center justify-center gap-3 font-bold text-xs shadow-lg active:scale-95">
+                                                    <span className="text-lg">📸</span>
+                                                    {practiceFiles[p.id || idx] ? 'Photo Ready' : 'Upload Your Answer'}
                                                     <input
                                                         type="file"
                                                         accept="image/*"
                                                         className="hidden"
-                                                        onChange={(e) => {
-                                                            const file = e.target.files?.[0] || null;
-                                                            setPracticeFiles({ ...practiceFiles, [p.id || idx]: file });
-                                                        }}
+                                                        onChange={(e) => setPracticeFiles({ ...practiceFiles, [p.id || idx]: e.target.files?.[0] || null })}
                                                     />
                                                 </label>
                                                 <button
-                                                    onClick={() => setShowPracticeSolutions({ ...showPracticeSolutions, [p.id || idx]: !showPracticeSolutions[p.id || idx] })}
-                                                    className="px-3 py-1.5 text-indigo-600 hover:bg-indigo-50 rounded-md text-xs font-medium transition-colors"
+                                                    onClick={() => handlePracticeSolutionUpload(p.id, idx)}
+                                                    disabled={!practiceFiles[p.id || idx] || isAnalyzingPractice[p.id || idx]}
+                                                    className="bg-indigo-500 text-white w-14 h-14 rounded-2xl hover:bg-indigo-400 disabled:opacity-50 transition-all flex items-center justify-center shadow-lg active:scale-95 shrink-0"
                                                 >
-                                                    {showPracticeSolutions[p.id || idx] ? 'Hide' : '👁 Solution'}
+                                                    {isAnalyzingPractice[p.id || idx] ? <Loader2 className="w-6 h-6 animate-spin" /> : <ZoomIn className="w-6 h-6" />}
                                                 </button>
                                             </div>
-                                            <button
-                                                onClick={() => handlePracticeSolutionUpload(p.id, idx)}
-                                                disabled={!practiceFiles[p.id || idx] || isAnalyzingPractice[p.id || idx]}
-                                                className="px-4 py-1.5 bg-gray-900 text-white rounded-md text-xs font-medium hover:bg-gray-800 shadow-sm disabled:opacity-50 flex items-center gap-2"
-                                            >
-                                                {isAnalyzingPractice[p.id || idx] ? (
-                                                    <><Loader2 className="w-3 h-3 animate-spin" /> Checking...</>
-                                                ) : (
-                                                    'Analyze'
-                                                )}
-                                            </button>
-                                        </div>
 
-                                        {/* Practice Solution Feedback */}
-                                        {practiceAnalysisResults[p.id || idx] && (
-                                            <div className="mt-4 bg-white border border-indigo-100 rounded-xl overflow-hidden animate-in fade-in slide-in-from-top-2">
-                                                <div className="bg-indigo-50/50 p-3 border-b border-indigo-50 flex justify-between items-center">
-                                                    <h3 className="font-semibold text-sm text-indigo-900 flex items-center gap-2">
-                                                        🤖 AI Assessment
-                                                    </h3>
-                                                    <div className="flex items-center gap-1">
-                                                        <span className="text-xs text-indigo-600 font-medium">Score:</span>
-                                                        <span className={`text-sm font-bold ${practiceAnalysisResults[p.id || idx].score >= 80 ? 'text-green-600' : practiceAnalysisResults[p.id || idx].score >= 60 ? 'text-yellow-600' : 'text-red-600'}`}>
-                                                            {practiceAnalysisResults[p.id || idx].score}/100
-                                                        </span>
+                                            {/* Practice Solution Results */}
+                                            {practiceAnalysisResults[p.id || idx] && (
+                                                <div className="bg-black/20 rounded-2xl p-5 border border-white/5 animate-in slide-in-from-top-4">
+                                                    <div className="flex items-center justify-between mb-4">
+                                                        <span className="text-[10px] font-black tracking-widest text-indigo-300">AI FEEDBACK</span>
+                                                        <span className="text-xl font-black">{practiceAnalysisResults[p.id || idx].score}</span>
+                                                    </div>
+                                                    <div className="space-y-3">
+                                                        {practiceAnalysisResults[p.id || idx].logic_gaps?.length > 0 && (
+                                                            <p className="text-red-300 text-[10px] italic">Logic issues detected.</p>
+                                                        )}
+                                                        <div className="p-3 bg-white/5 rounded-xl text-xs text-indigo-50">
+                                                            <LatexRenderer content={practiceAnalysisResults[p.id || idx].suggestions || ""} block={false} />
+                                                        </div>
                                                     </div>
                                                 </div>
-                                                <div className="p-3 space-y-3">
-                                                    {practiceAnalysisResults[p.id || idx].logic_gaps && practiceAnalysisResults[p.id || idx].logic_gaps.length > 0 && (
+                                            )}
+
+                                            {showPracticeSolutions[p.id || idx] && (
+                                                <div className="bg-indigo-800/50 border border-white/10 rounded-[1.5rem] p-6 animate-in slide-in-from-top-4 duration-300 shadow-inner">
+                                                    <div className="space-y-6">
                                                         <div>
-                                                            <h4 className="text-xs font-bold text-red-700 mb-1 flex items-center gap-1">🚫 Logic Issues</h4>
-                                                            <ul className="list-disc list-inside text-xs text-gray-700 bg-red-50/50 p-2 rounded">
-                                                                {practiceAnalysisResults[p.id || idx].logic_gaps.map((gap: string, i: number) => <li key={i}>{gap}</li>)}
-                                                            </ul>
+                                                            <p className="text-[10px] text-indigo-300 font-bold uppercase tracking-widest mb-3">Target Answer</p>
+                                                            <div className="text-lg font-black text-white">{aiData.answer || p.answer || "N/A"}</div>
                                                         </div>
-                                                    )}
-                                                    {practiceAnalysisResults[p.id || idx].calculation_errors && practiceAnalysisResults[p.id || idx].calculation_errors.length > 0 && (
                                                         <div>
-                                                            <h4 className="text-xs font-bold text-orange-700 mb-1 flex items-center gap-1">⚠️ Calc Errors</h4>
-                                                            <ul className="list-disc list-inside text-xs text-gray-700 bg-orange-50/50 p-2 rounded">
-                                                                {practiceAnalysisResults[p.id || idx].calculation_errors.map((err: string, i: number) => <li key={i}>{err}</li>)}
-                                                            </ul>
-                                                        </div>
-                                                    )}
-                                                    {practiceAnalysisResults[p.id || idx].suggestions && (
-                                                        <div>
-                                                            <h4 className="text-xs font-bold text-blue-700 mb-1 flex items-center gap-1">💡 Suggestion</h4>
-                                                            <div className="text-xs text-gray-700 bg-blue-50/50 p-2 rounded">
-                                                                <LatexRenderer content={practiceAnalysisResults[p.id || idx].suggestions} block={false} />
+                                                            <p className="text-[10px] text-indigo-300 font-bold uppercase tracking-widest mb-3">Model Solution</p>
+                                                            <div className="text-sm text-indigo-50 leading-relaxed font-medium">
+                                                                <LatexRenderer content={aiData.solution || p.solution || ""} block />
                                                             </div>
                                                         </div>
-                                                    )}
+                                                    </div>
                                                 </div>
-                                            </div>
-                                        )}
-
-                                        {/* Solution Reveal */}
-                                        {showPracticeSolutions[p.id || idx] && (
-                                            <div className="mt-3 p-3 bg-green-50 rounded-lg border border-green-100 text-sm animate-in fade-in zoom-in-95">
-                                                <p className="font-semibold text-green-800 mb-1">Answer:</p>
-                                                <div className="text-gray-800 mb-2">{aiData.answer || p.answer || "N/A"}</div>
-                                                <p className="font-semibold text-green-800 mb-1">Solution:</p>
-                                                <div className="text-gray-700">
-                                                    <LatexRenderer content={aiData.solution || p.solution || ""} block />
-                                                </div>
-                                            </div>
-                                        )}
+                                            )}
+                                        </div>
                                     </div>
-                                </div>
-                            )
-                        })}
-                    </div>
-                )}
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
             </div>
+
+            {/* Premium Zoom Modal */}
+            {isZoomModalOpen && (
+                <div
+                    className="fixed inset-0 z-50 bg-black/95 backdrop-blur-md flex items-center justify-center p-4 md:p-12 animate-in fade-in duration-300"
+                    onClick={() => setIsZoomModalOpen(false)}
+                >
+                    <div className="relative w-full h-full flex items-center justify-center animate-in zoom-in-95 duration-500">
+                        <img
+                            src={zoomImageSrc}
+                            alt="Zoom Preview"
+                            className="max-w-full max-h-full object-contain rounded-lg shadow-[0_0_100px_rgba(0,0,0,0.5)] border border-white/10"
+                        />
+                        <button
+                            className="absolute top-0 right-0 m-4 md:m-8 text-white/50 hover:text-white bg-white/10 hover:bg-white/20 w-12 h-12 rounded-2xl flex items-center justify-center transition-all backdrop-blur-xl border border-white/10 group"
+                            onClick={() => setIsZoomModalOpen(false)}
+                        >
+                            <svg className="w-6 h-6 transition-transform group-hover:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                        </button>
+                    </div>
+                </div>
+            )}
         </div>
     );
 
     async function handleSolutionUpload() {
         if (!solutionFile) return;
         setIsAnalyzingSolution(true);
+        console.log("Analyzing solution for problem:", id);
         const formData = new FormData();
         formData.append('file', solutionFile);
 
@@ -542,13 +662,28 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
             });
             if (res.ok) {
                 const data = await res.json();
+                console.log("Analysis successful:", data);
                 setAnalysisResult(data.feedback_json);
+                setCurrentAttemptModel(data.ai_model_used);
+                // Update local problem state to include the new attempt in thumbnails
+                setProblem((prev: any) => ({
+                    ...prev,
+                    solution_attempts: [...(prev.solution_attempts || []), data]
+                }));
+                // Clear the file input
+                setSolutionFile(null);
+                // Scroll to result after a short delay to allow state update
+                setTimeout(() => {
+                    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+                }, 100);
             } else {
-                alert("Analysis failed.");
+                const errData = await res.json().catch(() => ({}));
+                console.error("Analysis failed:", errData);
+                alert("Analysis failed: " + (errData.detail || "Server error"));
             }
         } catch (e) {
-            console.error(e);
-            alert("Error uploading solution.");
+            console.error("Upload error:", e);
+            alert("Error uploading solution. Please check your network connection.");
         } finally {
             setIsAnalyzingSolution(false);
         }

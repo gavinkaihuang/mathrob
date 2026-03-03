@@ -36,8 +36,8 @@ export default function SettingsPage() {
         const fetchSettings = async () => {
             try {
                 const [modelsRes, configRes] = await Promise.all([
-                    fetch('http://localhost:8000/api/settings/models/available'),
-                    fetch('http://localhost:8000/api/settings/models/config')
+                    fetch('http://127.0.0.1:8000/api/settings/models/available'),
+                    fetch('http://127.0.0.1:8000/api/settings/models/config')
                 ]);
 
                 if (modelsRes.ok && configRes.ok) {
@@ -66,7 +66,7 @@ export default function SettingsPage() {
         setIsSaving(true);
         setSaveMessage(null);
         try {
-            const response = await fetch('http://localhost:8000/api/settings/models/config', {
+            const response = await fetch('http://127.0.0.1:8000/api/settings/models/config', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(config)
