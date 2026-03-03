@@ -43,7 +43,7 @@ export function Navbar() {
                         <div className="flex">
                             <div className="flex-shrink-0 flex items-center">
                                 <Link href="/" className="text-xl font-bold text-indigo-600 flex items-center gap-2">
-                                    <img src="/logo.jpg" alt="Logo" className="w-8 h-8 rounded-lg shadow-sm" />
+                                    <img src="/logo.png" alt="Logo" className="w-8 h-8 rounded-lg shadow-sm" />
                                     <span>MathRob AI</span>
                                 </Link>
                             </div>

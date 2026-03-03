@@ -18,7 +18,7 @@ export const metadata: Metadata = {
   title: "MathRob AI",
   description: "Your AI Math Tutor",
   icons: {
-    icon: '/logo.jpg',
+    icon: '/favicon.png',
   },
 };
 

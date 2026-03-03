@@ -40,7 +40,7 @@ cd frontend
 npm install
 npm run dev
 ```
-Frontend running at: http://localhost:3000
+Frontend running at: http://localhost:3006
 
 ## Features
 - **Auto-Scan**: Drops images into `scan_data/` to automatically process them.
