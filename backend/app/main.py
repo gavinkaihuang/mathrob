@@ -11,8 +11,9 @@ from .services.ai_service import AIService
 # Initialize AI Service
 ai_service = AIService()
 
-# Ensure uploads dir exists
-UPLOAD_DIR = os.path.join(os.getcwd(), "backend/uploads")
+# Ensure uploads dir exists (robust path resolution)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 

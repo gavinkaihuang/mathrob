@@ -194,11 +194,11 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
                             <div className="aspect-[3/4] bg-gray-50 relative group">
                                 {problem.image_path ? (
                                     <img
-                                        src={`/static/${problem.image_path.split('/').pop()}`}
+                                        src={`${process.env.NEXT_PUBLIC_API_URL || ''}/static/${problem.image_path.split('/').pop()}`}
                                         alt="Problem Scan"
                                         className="w-full h-full object-contain cursor-zoom-in"
                                         onClick={() => {
-                                            setZoomImageSrc(`/static/${problem.image_path.split('/').pop()}`);
+                                            setZoomImageSrc(`${process.env.NEXT_PUBLIC_API_URL || ''}/static/${problem.image_path.split('/').pop()}`);
                                             setIsZoomModalOpen(true);
                                         }}
                                     />
@@ -374,7 +374,7 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
                                                     key={idx}
                                                     className="w-24 h-32 bg-gray-50 rounded-xl border border-gray-200 overflow-hidden relative cursor-pointer hover:ring-2 hover:ring-indigo-500 transition-all group shadow-sm"
                                                     onClick={() => {
-                                                        setZoomImageSrc(`/static/${attempt.image_path}`);
+                                                        setZoomImageSrc(`${process.env.NEXT_PUBLIC_API_URL || ''}/static/${attempt.image_path}`);
                                                         setAnalysisResult(attempt.feedback_json);
                                                         setCurrentAttemptModel(attempt.ai_model_used);
                                                         setIsZoomModalOpen(true);
@@ -401,7 +401,7 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
                                                         <RefreshCw className={`w-3.5 h-3.5 ${isAnalyzingSolution ? 'animate-spin' : ''}`} />
                                                     </button>
                                                     <img
-                                                        src={`/static/${attempt.image_path}`}
+                                                        src={`${process.env.NEXT_PUBLIC_API_URL || ''}/static/${attempt.image_path}`}
                                                         alt="Past attempt"
                                                         className="w-full h-full object-cover"
                                                     />
