@@ -4,6 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { fetchWithAuth } from '@/utils/api';
 import { motion, AnimatePresence } from 'framer-motion';
+import { LatexRenderer } from '@/components/LatexRenderer';
 
 interface ReviewItem {
     id: number;
@@ -20,6 +21,7 @@ export default function ReviewPage() {
     const [showAnswer, setShowAnswer] = useState(false);
     const [loading, setLoading] = useState(true);
     const [completed, setCompleted] = useState(false);
+    const [error, setError] = useState<string | null>(null);
     const router = useRouter();
 
     useEffect(() => {
@@ -32,10 +34,17 @@ export default function ReviewPage() {
             if (res.ok) {
                 const data = await res.json();
                 setItems(data);
+                if (data.length === 0) {
+                    console.log("No review items returned from API");
+                }
+            } else {
+                const errText = await res.text();
+                setError(`服务器返回错误 (${res.status}): ${errText.slice(0, 100)}`);
             }
             setLoading(false);
-        } catch (error) {
+        } catch (error: any) {
             console.error("Failed to load reviews", error);
+            setError(`网络错误: ${error.message || '未知错误'}`);
             setLoading(false);
         }
     };
@@ -61,6 +70,23 @@ export default function ReviewPage() {
 
     if (loading) return <div className="min-h-screen flex items-center justify-center">正在加载今日复习内容...</div>;
 
+    if (error) {
+        return (
+            <div className="min-h-screen flex flex-col items-center justify-center p-4 bg-red-50">
+                <div className="text-red-600 font-bold mb-4">⚠️ 加载失败</div>
+                <div className="text-gray-700 bg-white p-4 rounded border border-red-100 max-w-lg overflow-auto">
+                    {error}
+                </div>
+                <button
+                    onClick={() => { setError(null); setLoading(true); loadTodayReviews(); }}
+                    className="mt-6 px-6 py-2 bg-blue-600 text-white rounded-lg"
+                >
+                    重试
+                </button>
+            </div>
+        );
+    }
+
     if (completed || items.length === 0) {
         return (
             <div className="min-h-screen bg-gray-50 dark:bg-slate-900">
@@ -76,12 +102,22 @@ export default function ReviewPage() {
                         <p className="text-gray-600 dark:text-slate-400 text-lg mb-8">
                             {items.length === 0 ? '今天没有待复习的题目，休息一下吧！' : '持之以恒，才是记忆之王。明天见！'}
                         </p>
-                        <button
-                            onClick={() => router.push('/')}
-                            className="px-8 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-full transition-all font-semibold"
-                        >
-                            回首页
-                        </button>
+                        <div className="flex gap-4 justify-center">
+                            <button
+                                onClick={() => router.push('/')}
+                                className="px-8 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-full transition-all font-semibold"
+                            >
+                                回首页
+                            </button>
+                            {items.length === 0 && (
+                                <button
+                                    onClick={() => { setLoading(true); loadTodayReviews(); }}
+                                    className="px-8 py-3 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-full transition-all font-semibold"
+                                >
+                                    刷新试试
+                                </button>
+                            )}
+                        </div>
                     </motion.div>
                 </div>
             </div>
@@ -115,11 +151,8 @@ export default function ReviewPage() {
                     {/* Question Section */}
                     <div className="p-8 md:p-12 flex-grow">
                         <div className="text-xs uppercase tracking-widest text-gray-400 mb-6 font-bold">题目内容</div>
-                        <div className="text-xl md:text-2xl leading-relaxed text-slate-800 dark:text-slate-100 overflow-x-auto">
-                            {/* In a real app, use a LaTeX renderer component here */}
-                            <pre className="whitespace-pre-wrap font-serif italic text-center py-8">
-                                {currentItem.latex_content}
-                            </pre>
+                        <div className="text-xl md:text-2xl leading-relaxed text-slate-800 dark:text-slate-100 overflow-x-auto min-h-[100px] flex items-center justify-center">
+                            <LatexRenderer content={currentItem.latex_content} block />
                         </div>
 
                         {currentItem.trigger_variant && (
@@ -139,14 +172,14 @@ export default function ReviewPage() {
                             >
                                 <div className="mb-8">
                                     <div className="text-xs uppercase tracking-widest text-blue-600/70 mb-3 font-bold">思路启发</div>
-                                    <p className="text-slate-600 dark:text-slate-400 italic leading-relaxed">
-                                        {currentItem.ai_analysis?.thinking_process || '暂无思路提示'}
-                                    </p>
+                                    <div className="text-slate-600 dark:text-slate-400 italic leading-relaxed">
+                                        <LatexRenderer content={currentItem.ai_analysis?.thinking_process || '暂无思路提示'} />
+                                    </div>
                                 </div>
                                 <div>
                                     <div className="text-xs uppercase tracking-widest text-green-600/70 mb-3 font-bold">正确解答</div>
                                     <div className="text-slate-700 dark:text-slate-300 whitespace-pre-wrap leading-relaxed">
-                                        {currentItem.ai_analysis?.solution || "暂无详细解析"}
+                                        <LatexRenderer content={currentItem.ai_analysis?.solution || "暂无详细解析"} block />
                                     </div>
                                 </div>
                             </motion.div>

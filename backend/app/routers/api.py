@@ -214,7 +214,6 @@ def update_mastery(problem_id: int, request: MasteryRequest, db: Session = Depen
     }
 
 @router.get("/daily-review", response_model=List[ProblemSchema])
-@router.get("/daily-review", response_model=List[ProblemSchema])
 def get_daily_review_problems(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Get problems due for review today based on SM-2.
@@ -629,77 +628,71 @@ def generate_weekly_report(db: Session = Depends(get_db), current_user: User = D
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/reviews/today")
-async def get_today_reviews(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_today_reviews(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """
+    Get problems due for review today with rich formatting for the review page.
+    """
     from datetime import datetime
     from sqlalchemy import and_, or_
     import random
     
     today = datetime.utcnow()
+    print(f"[DEBUG] Fetching reviews for user {current_user.id} at {today}")
     
-    # 1. Query problems due for review
-    # We join Problem and UserProgress to ensure the problem belongs to a learned knowledge_path
-    due_records = db.query(LearningRecord).join(Problem).join(
-        UserProgress,
-        and_(
-            Problem.knowledge_path == UserProgress.knowledge_path,
-            UserProgress.user_id == current_user.id
-        )
-    ).filter(
-        and_(
-            LearningRecord.user_id == current_user.id,
+    # Use the EXACT SAME query logic as daily-review
+    due_records = db.query(LearningRecord).filter(
+        LearningRecord.user_id == current_user.id,
+        or_(
             LearningRecord.review_date <= today,
-            UserProgress.is_learned == True
+            ((LearningRecord.status != 'correct') & (LearningRecord.review_date == None))
         )
     ).all()
+    
+    print(f"[DEBUG] Found {len(due_records)} due records for user {current_user.id}")
     
     if not due_records:
         return []
 
-    # 2. Extract problem data with rich context
+    # Map to rich dict for frontend
     raw_list = []
     for rec in due_records:
         p = rec.problem
+        if not p:
+            continue
+            
+        # Ensure we have all fields needed by ReviewItem interface in frontend
         item = {
             "id": p.id,
-            "latex_content": p.latex_content,
-            "difficulty": p.difficulty,
-            "knowledge_path": p.knowledge_path,
+            "latex_content": p.latex_content or "",
+            "difficulty": p.difficulty or 0,
+            "knowledge_path": p.knowledge_path or "unknown",
             "ai_analysis": p.ai_analysis,
-            "ai_model": p.ai_model,
-            "ease_factor": rec.ease_factor,
-            # If ease_factor is high (e.g. > 2.8), suggest a variant instead of the original
-            "trigger_variant": rec.ease_factor >= 2.8
+            "trigger_variant": (rec.ease_factor or 2.5) >= 2.8
         }
         raw_list.append(item)
 
-    # 3. Intelligent Shuffling & Grouping
-    # Group by knowledge_path
+    # Interleaving/Shuffling logic
     by_kp = {}
     for item in raw_list:
-        kp = item["knowledge_path"] or "unknown"
+        kp = item["knowledge_path"]
         if kp not in by_kp:
             by_kp[kp] = []
         by_kp[kp].append(item)
     
-    # Interleave them to avoid same KP appearing > 3 times consecutively
     final_selection = []
     kps = list(by_kp.keys())
     
     while kps and len(final_selection) < 15:
-        # Pick a random KP that wasn't just used 3 times
-        # (Simplified: just shuffle the list of KPs and pull one)
         random.shuffle(kps)
         target_kp = kps[0]
-        
-        # Add up to 1-2 items from this KP then rotate
         batch_size = min(len(by_kp[target_kp]), random.randint(1, 2))
         for _ in range(batch_size):
             if len(final_selection) < 15:
                 final_selection.append(by_kp[target_kp].pop(0))
-        
         if not by_kp[target_kp]:
             kps.remove(target_kp)
 
+    print(f"[DEBUG] Returning {len(final_selection)} selected items")
     return final_selection
 
 @router.get("/reports")

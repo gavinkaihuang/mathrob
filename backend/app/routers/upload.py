@@ -83,6 +83,18 @@ async def upload_file(
     )
     
     db.add(new_problem)
+    db.flush() # Get the ID before commit
+
+    # 6. Create initial LearningRecord so it appears in review
+    from ..models import LearningRecord
+    new_record = LearningRecord(
+        user_id=current_user.id,
+        problem_id=new_problem.id,
+        status="pending",
+        review_date=datetime.utcnow() # Due immediately
+    )
+    db.add(new_record)
+    
     db.commit()
     db.refresh(new_problem)
     

@@ -1,6 +1,5 @@
 'use client';
 
-import 'katex/dist/katex.min.css';
 import { InlineMath, BlockMath } from 'react-katex';
 
 interface LatexRendererProps {
@@ -11,10 +10,23 @@ interface LatexRendererProps {
 export function LatexRenderer({ content, block = false }: LatexRendererProps) {
     if (!content) return null;
 
-    // Split by $ delimiter to handle mixed text and inline math
-    // Example: "Let $x$ be..." -> ["Let ", "x", " be..."]
-    const parts = content.split('$');
+    // If no $ delimiters are present, we look for common LaTeX commands
+    if (!content.includes('$')) {
+        const looksLikeLatex = /[\\]|[\^]|[_]|[{]|[}]/.test(content);
+        if (looksLikeLatex) {
+            return block ? (
+                <div className="latex-block py-2 flex justify-center w-full overflow-x-auto">
+                    <BlockMath math={content} />
+                </div>
+            ) : (
+                <InlineMath math={content} />
+            );
+        }
+        // Fallback for non-latex content
+        return block ? <div className="py-2">{content}</div> : <span>{content}</span>;
+    }
 
+    const parts = content.split('$');
     const elements = parts.map((part, index) => {
         // Even index is text, Odd index is math
         if (index % 2 === 0) {
