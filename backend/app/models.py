@@ -90,6 +90,7 @@ class LearningRecord(Base):
     repetitions = Column(Integer, default=0)
     
     review_date = Column(DateTime, nullable=True)
+    last_reviewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", backref="learning_records")

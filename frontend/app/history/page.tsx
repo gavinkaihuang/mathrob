@@ -23,14 +23,16 @@ import { fetchWithAuth } from '../../utils/api';
 export default function HistoryPage() {
     const [problems, setProblems] = useState<Problem[]>([]);
     const [loading, setLoading] = useState(true);
-    const [filterMastery, setFilterMastery] = useState<number | 'all'>('all');
+    const [filterMastery, setFilterMastery] = useState<number | 'all' | 'recent'>('all');
 
     useEffect(() => {
         async function fetchProblems() {
             setLoading(true);
             try {
                 let url = `/api/problems?limit=50`;
-                if (filterMastery !== 'all') {
+                if (filterMastery === 'recent') {
+                    url = `/api/reviews/history?days=7`;
+                } else if (filterMastery !== 'all') {
                     url += `&mastery=${filterMastery}`;
                 }
 
@@ -58,8 +60,8 @@ export default function HistoryPage() {
                             <ArrowLeft className="w-6 h-6 text-gray-600" />
                         </Link>
                         <div>
-                            <h1 className="text-2xl font-bold text-gray-900">Problem History</h1>
-                            <p className="text-sm text-gray-500">Review your past scans and mastery progress</p>
+                            <h1 className="text-2xl font-bold text-gray-900">复习题库 (Review Library)</h1>
+                            <p className="text-sm text-gray-500">查看所有的题目记录及掌握程度</p>
                         </div>
                     </div>
 
@@ -68,13 +70,14 @@ export default function HistoryPage() {
                         <Filter className="w-4 h-4 text-gray-400 ml-2" />
                         <select
                             value={filterMastery}
-                            onChange={(e) => setFilterMastery(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+                            onChange={(e) => setFilterMastery(e.target.value as any)}
                             className="bg-transparent border-none text-sm font-medium focus:ring-0 text-gray-700 py-1 pr-8 cursor-pointer"
                         >
-                            <option value="all">All Problems</option>
-                            <option value="1">🔴 Not Understood</option>
-                            <option value="2">🟡 Half Understood</option>
-                            <option value="3">🟢 Mastered</option>
+                            <option value="all">所有题目 (All)</option>
+                            <option value="recent">🕐 最近复习 (Recently Reviewed)</option>
+                            <option value="1">🔴 未掌握 (Not Understood)</option>
+                            <option value="2">🟡 半掌握 (Half Understood)</option>
+                            <option value="3">🟢 已掌握 (Mastered)</option>
                         </select>
                     </div>
                 </div>

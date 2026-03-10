@@ -1,5 +1,6 @@
 import { FileUpload } from '@/components/FileUpload';
 import { DailyReviewList } from '@/components/DailyReviewList';
+import Link from 'next/link';
 
 export default function Home() {
   return (
@@ -20,6 +21,15 @@ export default function Home() {
 
         {/* Today's Tasks Section */}
         <DailyReviewList />
+
+        <div className="flex justify-center mt-6">
+          <Link
+            href="/history"
+            className="text-indigo-600 font-medium hover:text-indigo-800 flex items-center gap-1 transition-colors"
+          >
+            📚 进入复习题库 (Review Library) →
+          </Link>
+        </div>
       </div>
     </main>
   );

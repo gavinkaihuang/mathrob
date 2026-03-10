@@ -97,7 +97,6 @@ def get_problems(
     return problems
 
 @router.get("/problems/{problem_id}", response_model=ProblemSchema)
-@router.get("/problems/{problem_id}", response_model=ProblemSchema)
 def get_problem(problem_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     problem = db.query(Problem).filter(Problem.id == problem_id, Problem.user_id == current_user.id).first()
     if not problem:
@@ -196,6 +195,7 @@ def update_mastery(problem_id: int, request: MasteryRequest, db: Session = Depen
     # Set next review date
     from datetime import timedelta
     record.review_date = datetime.utcnow() + timedelta(days=interval)
+    record.last_reviewed_at = datetime.utcnow()
     record.created_at = datetime.utcnow() # Last activity time
     
     # Update legacy status field for compatibility
@@ -289,6 +289,7 @@ async def review_problem(
     record.interval = new_interval
     record.repetitions = new_reps
     record.review_date = next_date
+    record.last_reviewed_at = datetime.utcnow()
     record.mastery_level = score # Sync with UI selection
     record.status = "correct" if score == 2 else "wrong" # Basic status sync
     
@@ -694,6 +695,41 @@ def get_today_reviews(db: Session = Depends(get_db), current_user: User = Depend
 
     print(f"[DEBUG] Returning {len(final_selection)} selected items")
     return final_selection
+
+@router.get("/reviews/history", response_model=List[ProblemSchema])
+def get_review_history(
+    days: int = 7,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get problems that have been reviewed in the last N days.
+    """
+    from datetime import datetime, timedelta
+    
+    since = datetime.utcnow() - timedelta(days=days)
+    
+    # Find records reviewed recently
+    history_records = db.query(LearningRecord).filter(
+        LearningRecord.user_id == current_user.id,
+        LearningRecord.last_reviewed_at >= since
+    ).order_by(LearningRecord.last_reviewed_at.desc()).all()
+    
+    if not history_records:
+        return []
+        
+    problem_ids = [r.problem_id for r in history_records]
+    # Keep the order of problem_ids
+    problems_map = {p.id: p for p in db.query(Problem).filter(Problem.id.in_(problem_ids)).all()}
+    
+    ordered_problems = []
+    for rec in history_records:
+        p = problems_map.get(rec.problem_id)
+        if p:
+            p.current_mastery_level = rec.mastery_level
+            ordered_problems.append(p)
+            
+    return ordered_problems
 
 @router.get("/reports")
 def get_reports(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
