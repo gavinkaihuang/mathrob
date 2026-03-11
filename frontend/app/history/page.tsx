@@ -60,8 +60,7 @@ export default function HistoryPage() {
                             <ArrowLeft className="w-6 h-6 text-gray-600" />
                         </Link>
                         <div>
-                            <h1 className="text-2xl font-bold text-gray-900">复习题库 (Review Library)</h1>
-                            <p className="text-sm text-gray-500">查看所有的题目记录及掌握程度</p>
+                            <h1 className="text-2xl font-bold text-gray-900">错题本 (Mistake Book)</h1>
                         </div>
                     </div>
 

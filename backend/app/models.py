@@ -50,12 +50,29 @@ class Problem(Base):
     solution_attempts = relationship("SolutionAttempt", back_populates="problem")
     practice_problems = relationship("PracticeProblem", back_populates="source_problem")
 
+class PracticeSession(Base):
+    """Groups a batch of PracticeProblems generated in one request."""
+    __tablename__ = "practice_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    source_problem_id = Column(Integer, ForeignKey("problems.id"), nullable=True)
+    ai_model = Column(String, nullable=True)
+    problem_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", backref="practice_sessions")
+    source_problem = relationship("Problem", backref="practice_sessions")
+    problems = relationship("PracticeProblem", back_populates="session")
+
+
 class PracticeProblem(Base):
     __tablename__ = "practice_problems"
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     source_problem_id = Column(Integer, ForeignKey("problems.id"), nullable=True)
+    session_id = Column(Integer, ForeignKey("practice_sessions.id"), nullable=True)
     latex_content = Column(Text, nullable=True)
     difficulty = Column(Integer, nullable=True)
     knowledge_path = Column(String, nullable=True, index=True) 
@@ -65,6 +82,7 @@ class PracticeProblem(Base):
     
     user = relationship("User", backref="practice_problems")
     source_problem = relationship("Problem", back_populates="practice_problems")
+    session = relationship("PracticeSession", back_populates="problems")
 
 class KnowledgePoint(Base):
     __tablename__ = "knowledge_points"
@@ -95,6 +113,17 @@ class LearningRecord(Base):
 
     user = relationship("User", backref="learning_records")
     problem = relationship("Problem", back_populates="learning_records")
+
+class DailyReview(Base):
+    __tablename__ = "daily_reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    review_date = Column(Date, nullable=False, index=True) # The calendar date for this specific review batch
+    problem_ids = Column(JSON, nullable=False) # Store the selected problem IDs
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", backref="daily_reviews")
 
 class SolutionAttempt(Base):
     __tablename__ = "solution_attempts"

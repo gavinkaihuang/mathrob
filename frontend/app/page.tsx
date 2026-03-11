@@ -1,5 +1,4 @@
 import { FileUpload } from '@/components/FileUpload';
-import { DailyReviewList } from '@/components/DailyReviewList';
 import Link from 'next/link';
 
 export default function Home() {
@@ -18,11 +17,6 @@ export default function Home() {
         <div className="bg-white p-8 rounded-2xl shadow-sm border border-gray-100">
           <FileUpload />
         </div>
-
-        {/* Today's Tasks Section */}
-        <DailyReviewList />
-
-
       </div>
     </main>
   );

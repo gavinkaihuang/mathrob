@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Union
 from pydantic import BaseModel
 from ..database import get_db
-from ..models import Problem, KnowledgePoint, LearningRecord, SolutionAttempt, User, PracticeProblem, UserProgress, APICallLog, SystemLog
+from ..models import Problem, KnowledgePoint, KnowledgeNode, LearningRecord, SolutionAttempt, User, PracticeProblem, PracticeSession, UserProgress, APICallLog, SystemLog, DailyReview
 import os
 from datetime import datetime
 from ..services.ai_service import AIService, AIServiceException
@@ -384,6 +384,16 @@ async def generate_similar_practice(problem_id: int, db: Session = Depends(get_d
     # Extract problems from result
     similar_problems = result.get("problems", [])
     
+    # Create a PracticeSession to group this batch
+    session = PracticeSession(
+        user_id=current_user.id,
+        source_problem_id=problem.id,
+        ai_model=result.get("ai_model", "Utility Model"),
+        problem_count=len(similar_problems)
+    )
+    db.add(session)
+    db.flush()  # Get session.id before committing
+
     saved_problems = []
     for sp in similar_problems:
         new_prob = PracticeProblem(
@@ -393,6 +403,7 @@ async def generate_similar_practice(problem_id: int, db: Session = Depends(get_d
             knowledge_path=problem.knowledge_path,
             ai_model=result.get("ai_model", "Utility Model"),
             source_problem_id=problem.id,
+            session_id=session.id,
             ai_analysis={
                 "topic": ["Generated Practice"],
                 "solution": sp.get("solution", ""),
@@ -405,6 +416,7 @@ async def generate_similar_practice(problem_id: int, db: Session = Depends(get_d
         saved_problems.append(new_prob)
         
     db.commit()
+    db.refresh(session)
     for sp in saved_problems:
         db.refresh(sp)
         
@@ -414,14 +426,73 @@ async def generate_similar_practice(problem_id: int, db: Session = Depends(get_d
 @router.get("/problems/{problem_id}/similar")
 def get_similar_practice(problem_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Fetches previously generated practice problems linked to a specific source problem."""
-    # Ensure source problem is owned by user (or at least the children are)
     practice_problems = db.query(PracticeProblem).filter(
         PracticeProblem.source_problem_id == problem_id,
         PracticeProblem.user_id == current_user.id
     ).order_by(PracticeProblem.created_at.asc()).all()
-    
-    # We can return them directly since their structure maps well to the frontend expectations 
     return practice_problems
+
+
+# --- Practice History ---
+
+class PracticeSessionSchema(BaseModel):
+    id: int
+    source_problem_id: Optional[int] = None
+    ai_model: Optional[str] = None
+    problem_count: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+@router.get("/practices/history", response_model=List[PracticeSessionSchema])
+def get_practice_history(
+    skip: int = 0,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Returns a paginated list of past PracticeSession records for the current user,
+    ordered by most recent first.
+    """
+    sessions = db.query(PracticeSession).filter(
+        PracticeSession.user_id == current_user.id
+    ).order_by(PracticeSession.created_at.desc()).offset(skip).limit(limit).all()
+    return sessions
+
+
+@router.get("/practices/sessions/{session_id}")
+def get_practice_session_detail(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Returns the PracticeProblems belonging to a specific session.
+    """
+    session = db.query(PracticeSession).filter(
+        PracticeSession.id == session_id,
+        PracticeSession.user_id == current_user.id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    problems = db.query(PracticeProblem).filter(
+        PracticeProblem.session_id == session_id
+    ).order_by(PracticeProblem.created_at.asc()).all()
+    
+    return {
+        "session": {
+            "id": session.id,
+            "source_problem_id": session.source_problem_id,
+            "ai_model": session.ai_model,
+            "problem_count": session.problem_count,
+            "created_at": session.created_at
+        },
+        "problems": problems
+    }
 
 @router.post("/practice-problems/{problem_id}/submit_solution")
 async def submit_practice_solution(
@@ -637,19 +708,56 @@ def get_today_reviews(db: Session = Depends(get_db), current_user: User = Depend
     from sqlalchemy import and_, or_
     import random
     
-    today = datetime.utcnow()
-    print(f"[DEBUG] Fetching reviews for user {current_user.id} at {today}")
+    today_date = datetime.utcnow().date()
+    
+    # 1. Check if we already generated a review set for today
+    daily_review = db.query(DailyReview).filter(
+        DailyReview.user_id == current_user.id,
+        DailyReview.review_date == today_date
+    ).first()
+
+    if daily_review:
+        # Return the previously generated selection
+        raw_list = []
+        for pid in daily_review.problem_ids:
+            p = db.query(Problem).filter(Problem.id == pid).first()
+            if p:
+                rec = db.query(LearningRecord).filter(
+                    LearningRecord.user_id == current_user.id,
+                    LearningRecord.problem_id == p.id
+                ).first()
+                if rec:
+                    node_name = None
+                    if p.knowledge_path and p.knowledge_path != "unknown":
+                        node = db.query(KnowledgeNode).filter(KnowledgeNode.path == p.knowledge_path).first()
+                        if node:
+                            node_name = node.name
+
+                    item = {
+                        "id": p.id,
+                        "latex_content": p.latex_content or "",
+                        "difficulty": p.difficulty or 0,
+                        "knowledge_path": p.knowledge_path or "unknown",
+                        "knowledge_node_name": node_name,
+                        "ai_analysis": p.ai_analysis,
+                        "trigger_variant": (rec.ease_factor or 2.5) >= 2.8,
+                        "mastery_level": rec.mastery_level or 0
+                    }
+                    raw_list.append(item)
+        return raw_list
+
+    # 2. If no existing review, generate a new batch
+    today_dt = datetime.utcnow()
+    print(f"[DEBUG] Generating new reviews for user {current_user.id} at {today_dt}")
     
     # Use the EXACT SAME query logic as daily-review
     due_records = db.query(LearningRecord).filter(
         LearningRecord.user_id == current_user.id,
         or_(
-            LearningRecord.review_date <= today,
+            LearningRecord.review_date <= today_dt,
             ((LearningRecord.status != 'correct') & (LearningRecord.review_date == None))
         )
     ).all()
-    
-    print(f"[DEBUG] Found {len(due_records)} due records for user {current_user.id}")
     
     if not due_records:
         return []
@@ -661,14 +769,21 @@ def get_today_reviews(db: Session = Depends(get_db), current_user: User = Depend
         if not p:
             continue
             
-        # Ensure we have all fields needed by ReviewItem interface in frontend
+        node_name = None
+        if p.knowledge_path and p.knowledge_path != "unknown":
+            node = db.query(KnowledgeNode).filter(KnowledgeNode.path == p.knowledge_path).first()
+            if node:
+                node_name = node.name
+
         item = {
             "id": p.id,
             "latex_content": p.latex_content or "",
             "difficulty": p.difficulty or 0,
             "knowledge_path": p.knowledge_path or "unknown",
+            "knowledge_node_name": node_name,
             "ai_analysis": p.ai_analysis,
-            "trigger_variant": (rec.ease_factor or 2.5) >= 2.8
+            "trigger_variant": (rec.ease_factor or 2.5) >= 2.8,
+            "mastery_level": rec.mastery_level or 0
         }
         raw_list.append(item)
 
@@ -693,43 +808,129 @@ def get_today_reviews(db: Session = Depends(get_db), current_user: User = Depend
         if not by_kp[target_kp]:
             kps.remove(target_kp)
 
-    print(f"[DEBUG] Returning {len(final_selection)} selected items")
+    # 3. Save the new generated batch to the database
+    problem_ids = [item["id"] for item in final_selection]
+    if problem_ids:
+        new_daily_review = DailyReview(
+            user_id=current_user.id,
+            review_date=today_date,
+            problem_ids=problem_ids
+        )
+        db.add(new_daily_review)
+        db.commit()
+
     return final_selection
 
-@router.get("/reviews/history", response_model=List[ProblemSchema])
+class DailyReviewSchema(BaseModel):
+    id: int
+    review_date: str
+    problem_count: int
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+@router.get("/reviews/history")
 def get_review_history(
-    days: int = 7,
+    limit: int = 50,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
-    Get problems that have been reviewed in the last N days.
+    Get the history of generated DailyReview sessions.
     """
-    from datetime import datetime, timedelta
+    sessions = db.query(DailyReview).filter(
+        DailyReview.user_id == current_user.id
+    ).order_by(DailyReview.review_date.desc()).limit(limit).all()
     
-    since = datetime.utcnow() - timedelta(days=days)
+    result = []
+    for s in sessions:
+        # Convert model dates appropriately
+        result.append({
+            "id": s.id,
+            "review_date": s.review_date.isoformat(),
+            "problem_count": len(s.problem_ids),
+            "created_at": s.created_at
+        })
+    return result
+
+@router.get("/reviews/history/{session_id}")
+def get_review_session_details(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get all problems corresponding to a specific historical DailyReview session.
+    """
+    session = db.query(DailyReview).filter(
+        DailyReview.id == session_id,
+        DailyReview.user_id == current_user.id
+    ).first()
     
-    # Find records reviewed recently
-    history_records = db.query(LearningRecord).filter(
-        LearningRecord.user_id == current_user.id,
-        LearningRecord.last_reviewed_at >= since
-    ).order_by(LearningRecord.last_reviewed_at.desc()).all()
-    
-    if not history_records:
-        return []
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
         
-    problem_ids = [r.problem_id for r in history_records]
-    # Keep the order of problem_ids
-    problems_map = {p.id: p for p in db.query(Problem).filter(Problem.id.in_(problem_ids)).all()}
-    
-    ordered_problems = []
-    for rec in history_records:
-        p = problems_map.get(rec.problem_id)
+    problems = []
+    for pid in session.problem_ids:
+        p = db.query(Problem).filter(Problem.id == pid).first()
         if p:
-            p.current_mastery_level = rec.mastery_level
-            ordered_problems.append(p)
-            
-    return ordered_problems
+            rec = db.query(LearningRecord).filter(
+                LearningRecord.user_id == current_user.id,
+                LearningRecord.problem_id == p.id
+            ).first()
+            if rec:
+                node_name = None
+                if p.knowledge_path and p.knowledge_path != "unknown":
+                    node = db.query(KnowledgeNode).filter(KnowledgeNode.path == p.knowledge_path).first()
+                    if node:
+                        node_name = node.name
+
+                item = {
+                    "id": p.id,
+                    "latex_content": p.latex_content or "",
+                    "difficulty": p.difficulty or 0,
+                    "knowledge_path": p.knowledge_path or "unknown",
+                    "knowledge_node_name": node_name,
+                    "ai_analysis": p.ai_analysis,
+                    "trigger_variant": (rec.ease_factor or 2.5) >= 2.8,
+                    "review_history_status": getattr(rec, 'status', 'pending'),
+                    "mastery_level": rec.mastery_level or 0
+                }
+                problems.append(item)
+                
+    return {
+        "id": session.id,
+        "review_date": session.review_date.isoformat(),
+        "problems": problems
+    }
+
+class MasteryUpdateSchema(BaseModel):
+    mastery_level: int
+
+@router.post("/reviews/problems/{problem_id}/mastery")
+def update_problem_mastery(
+    problem_id: int,
+    data: MasteryUpdateSchema,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update the user's mastery level for a specific problem.
+    Supported levels: 1 (Won't), 2 (Half), 3 (Mastered)
+    """
+    rec = db.query(LearningRecord).filter(
+        LearningRecord.user_id == current_user.id,
+        LearningRecord.problem_id == problem_id
+    ).first()
+    
+    if not rec:
+        raise HTTPException(status_code=404, detail="Learning record not found for this problem")
+        
+    rec.mastery_level = data.mastery_level
+    db.commit()
+    
+    return {"status": "success", "mastery_level": data.mastery_level}
 
 @router.get("/reports")
 def get_reports(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):

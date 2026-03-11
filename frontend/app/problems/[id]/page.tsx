@@ -22,12 +22,19 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
     const [practiceProblems, setPracticeProblems] = useState<any[]>([]);
     const [generatingPractice, setGeneratingPractice] = useState(false);
     const [isReanalyzing, setIsReanalyzing] = useState(false);
-    const [showPracticeSolutions, setShowPracticeSolutions] = useState<{ [key: number]: boolean }>({});
+    const [showPracticeSolutions, setShowPracticeSolutions] = useState<{ [key: string]: boolean }>({});
 
     // Practice Solution Grading State
     const [practiceFiles, setPracticeFiles] = useState<{ [key: number]: File | null }>({});
     const [isAnalyzingPractice, setIsAnalyzingPractice] = useState<{ [key: number]: boolean }>({});
     const [practiceAnalysisResults, setPracticeAnalysisResults] = useState<{ [key: number]: any }>({});
+
+    // Practice History State
+    const [practiceTab, setPracticeTab] = useState<'generate' | 'history'>('generate');
+    const [historySessions, setHistorySessions] = useState<any[]>([]);
+    const [loadingHistory, setLoadingHistory] = useState(false);
+    const [expandedSession, setExpandedSession] = useState<number | null>(null);
+    const [sessionProblems, setSessionProblems] = useState<{ [sessionId: number]: any[] }>({});
 
     // Solution Analysis State
     const [solutionFile, setSolutionFile] = useState<File | null>(null);
@@ -75,8 +82,26 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
             }
         }
 
+        async function fetchPracticeHistory() {
+            setLoadingHistory(true);
+            try {
+                const res = await fetchWithAuth(`/api/practices/history?limit=50`);
+                if (res.ok) {
+                    const all = await res.json();
+                    // Filter to only sessions for this problem
+                    const filtered = all.filter((s: any) => s.source_problem_id === parseInt(id));
+                    setHistorySessions(filtered);
+                }
+            } catch (error) {
+                console.error(error);
+            } finally {
+                setLoadingHistory(false);
+            }
+        }
+
         fetchProblem();
         fetchPracticeProblems();
+        fetchPracticeHistory();
     }, [id]);
 
     const handleDeleteAttempt = async (attemptId: number) => {
@@ -511,116 +536,224 @@ export default function ProblemPage({ params }: { params: Promise<{ id: string }
                 </div>
 
                 {/* Similar Practice Section (Full Width Bottom) */}
-                <div className="bg-indigo-900 rounded-[2.5rem] p-8 md:p-12 text-white overflow-hidden relative group">
+                <div className="bg-indigo-900 rounded-[2.5rem] p-8 md:p-12 text-white overflow-hidden relative">
                     <div className="absolute top-0 right-0 w-96 h-96 bg-indigo-500 rounded-full blur-[120px] opacity-20 -mr-48 -mt-48"></div>
                     <div className="absolute bottom-0 left-0 w-64 h-64 bg-purple-500 rounded-full blur-[100px] opacity-10 -ml-32 -mb-32"></div>
 
-                    <div className="relative z-10 flex flex-col md:flex-row justify-between items-center gap-8 mb-16">
-                        <div className="space-y-4 text-center md:text-left">
-                            <h2 className="text-4xl font-black tracking-tight leading-none bg-gradient-to-r from-white to-indigo-300 bg-clip-text text-transparent">同类练习 (Similar Practice)</h2>
-                            <p className="text-indigo-200 font-medium text-lg">Generate AI-powered variations to reinforce your understanding.</p>
+                    <div className="relative z-10">
+                        {/* Section Header */}
+                        <div className="flex flex-col md:flex-row justify-between items-center gap-6 mb-8">
+                            <div className="space-y-1 text-center md:text-left">
+                                <h2 className="text-3xl font-black tracking-tight bg-gradient-to-r from-white to-indigo-300 bg-clip-text text-transparent">同类练习 (Similar Practice)</h2>
+                                <p className="text-indigo-200 text-sm">Generate AI-powered variations to reinforce your understanding.</p>
+                            </div>
+                            <div className="flex items-center gap-3 flex-shrink-0">
+                                {/* Tab Switcher */}
+                                <div className="flex bg-white/10 rounded-2xl p-1 border border-white/10">
+                                    <button
+                                        onClick={() => setPracticeTab('generate')}
+                                        className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${practiceTab === 'generate' ? 'bg-white text-indigo-900 shadow-lg' : 'text-indigo-200 hover:text-white'}`}
+                                    >
+                                        🔄 生成练习
+                                    </button>
+                                    <button
+                                        onClick={() => setPracticeTab('history')}
+                                        className={`px-4 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-1.5 ${practiceTab === 'history' ? 'bg-white text-indigo-900 shadow-lg' : 'text-indigo-200 hover:text-white'}`}
+                                    >
+                                        📋 历史记录
+                                        {historySessions.length > 0 && (
+                                            <span className={`text-xs font-bold px-1.5 py-0.5 rounded-full ${practiceTab === 'history' ? 'bg-indigo-600 text-white' : 'bg-white/20'}`}>
+                                                {historySessions.length}
+                                            </span>
+                                        )}
+                                    </button>
+                                </div>
+                                {practiceTab === 'generate' && (
+                                    <button
+                                        onClick={generatePractice}
+                                        disabled={generatingPractice}
+                                        className="bg-white text-indigo-900 px-6 py-3 rounded-2xl font-black text-sm hover:bg-indigo-50 transition-all shadow-xl disabled:opacity-50 active:scale-95 flex items-center gap-2 border-2 border-white/20"
+                                    >
+                                        {generatingPractice ? <><Loader2 className="w-4 h-4 animate-spin" /> 生成中...</> : <><span>🔄</span> 生成挑战</>}
+                                    </button>
+                                )}
+                            </div>
                         </div>
-                        <button
-                            onClick={generatePractice}
-                            disabled={generatingPractice}
-                            className="bg-white text-indigo-900 px-10 py-5 rounded-[1.5rem] font-black text-sm hover:bg-indigo-50 transition-all shadow-2xl shadow-indigo-950/50 disabled:opacity-50 active:scale-95 flex items-center gap-3 border-4 border-white/20"
-                        >
-                            {generatingPractice ? (
-                                <><Loader2 className="w-5 h-5 animate-spin" /> Batch Generating...</>
-                            ) : (
-                                <><span className="text-lg">🔄</span> 生成挑战 (Generate Practice)</>
-                            )}
-                        </button>
-                    </div>
 
-                    {practiceProblems.length > 0 && (
-                        <div className="grid md:grid-cols-2 lg:grid-cols-2 gap-10 relative z-10">
-                            {practiceProblems.map((p: any, idx: number) => {
-                                let aiData = typeof p.ai_analysis === 'string' ? JSON.parse(p.ai_analysis) : (p.ai_analysis || {});
-                                return (
-                                    <div key={p.id || idx} className="bg-white/10 backdrop-blur-xl border border-white/10 rounded-[2rem] p-8 shadow-2xl group/card hover:bg-white/15 transition-all">
-                                        <div className="flex justify-between items-start mb-8">
-                                            <div className="bg-white text-indigo-900 px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider">
-                                                Practice Task #{idx + 1}
-                                            </div>
-                                            <div className="flex gap-2">
-                                                <button
-                                                    onClick={() => setShowPracticeSolutions({ ...showPracticeSolutions, [p.id || idx]: !showPracticeSolutions[p.id || idx] })}
-                                                    className="w-10 h-10 bg-white/10 hover:bg-white/20 rounded-xl flex items-center justify-center transition-all"
-                                                    title="Show Solution"
-                                                >
-                                                    <Eye className="w-5 h-5" />
-                                                </button>
-                                            </div>
-                                        </div>
-
-                                        <div className="bg-white rounded-[1.5rem] p-6 text-gray-900 min-h-[120px] flex items-center justify-center mb-8 shadow-inner ring-1 ring-black/5">
-                                            <div className="text-xl">
-                                                <LatexRenderer content={p.latex_content || p.latex || ""} block />
-                                            </div>
-                                        </div>
-
-                                        <div className="space-y-4">
-                                            <div className="flex gap-3">
-                                                <label className="flex-grow bg-white text-indigo-900 px-6 py-4 rounded-2xl cursor-pointer hover:bg-indigo-50 transition-all flex items-center justify-center gap-3 font-bold text-xs shadow-lg active:scale-95">
-                                                    <span className="text-lg">📸</span>
-                                                    {practiceFiles[p.id || idx] ? 'Photo Ready' : 'Upload Your Answer'}
-                                                    <input
-                                                        type="file"
-                                                        accept="image/*"
-                                                        className="hidden"
-                                                        onChange={(e) => setPracticeFiles({ ...practiceFiles, [p.id || idx]: e.target.files?.[0] || null })}
-                                                    />
-                                                </label>
-                                                <button
-                                                    onClick={() => handlePracticeSolutionUpload(p.id, idx)}
-                                                    disabled={!practiceFiles[p.id || idx] || isAnalyzingPractice[p.id || idx]}
-                                                    className="bg-indigo-500 text-white w-14 h-14 rounded-2xl hover:bg-indigo-400 disabled:opacity-50 transition-all flex items-center justify-center shadow-lg active:scale-95 shrink-0"
-                                                >
-                                                    {isAnalyzingPractice[p.id || idx] ? <Loader2 className="w-6 h-6 animate-spin" /> : <ZoomIn className="w-6 h-6" />}
-                                                </button>
-                                            </div>
-
-                                            {/* Practice Solution Results */}
-                                            {practiceAnalysisResults[p.id || idx] && (
-                                                <div className="bg-black/20 rounded-2xl p-5 border border-white/5 animate-in slide-in-from-top-4">
-                                                    <div className="flex items-center justify-between mb-4">
-                                                        <span className="text-[10px] font-black tracking-widest text-indigo-300">AI FEEDBACK</span>
-                                                        <span className="text-xl font-black">{practiceAnalysisResults[p.id || idx].score}</span>
+                        {/* Generate Tab */}
+                        {practiceTab === 'generate' && (
+                            <div>
+                                {generatingPractice && (
+                                    <div className="flex items-center justify-center gap-3 py-16 text-indigo-200">
+                                        <Loader2 className="w-6 h-6 animate-spin" />
+                                        <span className="font-medium">AI 正在生成同类练习题...</span>
+                                    </div>
+                                )}
+                                {!generatingPractice && practiceProblems.length === 0 && (
+                                    <div className="text-center py-16 text-indigo-300 text-sm">
+                                        点击"生成挑战"按钮来获取 AI 生成的同类练习题。
+                                    </div>
+                                )}
+                                {practiceProblems.length > 0 && (
+                                    <div className="grid md:grid-cols-2 gap-8">
+                                        {practiceProblems.map((p: any, idx: number) => {
+                                            const key = p.id || idx;
+                                            const aiData = typeof p.ai_analysis === 'string' ? JSON.parse(p.ai_analysis) : (p.ai_analysis || {});
+                                            return (
+                                                <div key={key} className="bg-white/10 backdrop-blur-xl border border-white/10 rounded-[2rem] p-8 shadow-2xl hover:bg-white/15 transition-all">
+                                                    <div className="flex justify-between items-start mb-6">
+                                                        <div className="bg-white text-indigo-900 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider">Practice #{idx + 1}</div>
+                                                        <button onClick={() => setShowPracticeSolutions({ ...showPracticeSolutions, [key]: !showPracticeSolutions[key] })} className="w-9 h-9 bg-white/10 hover:bg-white/20 rounded-xl flex items-center justify-center transition-all" title="Show Solution">
+                                                            <Eye className="w-4 h-4" />
+                                                        </button>
+                                                    </div>
+                                                    <div className="bg-white rounded-2xl p-5 text-gray-900 min-h-[100px] flex items-center justify-center mb-6 shadow-inner">
+                                                        <LatexRenderer content={p.latex_content || p.latex || ""} block />
                                                     </div>
                                                     <div className="space-y-3">
-                                                        {practiceAnalysisResults[p.id || idx].logic_gaps?.length > 0 && (
-                                                            <p className="text-red-300 text-[10px] italic">Logic issues detected.</p>
-                                                        )}
-                                                        <div className="p-3 bg-white/5 rounded-xl text-xs text-indigo-50">
-                                                            <LatexRenderer content={practiceAnalysisResults[p.id || idx].suggestions || ""} block={false} />
+                                                        <div className="flex gap-2">
+                                                            <label className="flex-grow bg-white text-indigo-900 px-4 py-3 rounded-xl cursor-pointer hover:bg-indigo-50 transition-all flex items-center justify-center gap-2 font-bold text-xs shadow-lg active:scale-95">
+                                                                <span>📸</span>{practiceFiles[key] ? 'Photo Ready' : 'Upload Answer'}
+                                                                <input type="file" accept="image/*" className="hidden" onChange={(e) => setPracticeFiles({ ...practiceFiles, [key]: e.target.files?.[0] || null })} />
+                                                            </label>
+                                                            <button onClick={() => handlePracticeSolutionUpload(p.id, idx)} disabled={!practiceFiles[key] || isAnalyzingPractice[key]} className="bg-indigo-500 text-white w-12 h-12 rounded-xl hover:bg-indigo-400 disabled:opacity-50 transition-all flex items-center justify-center shadow-lg active:scale-95 shrink-0">
+                                                                {isAnalyzingPractice[key] ? <Loader2 className="w-5 h-5 animate-spin" /> : <ZoomIn className="w-5 h-5" />}
+                                                            </button>
                                                         </div>
-                                                    </div>
-                                                </div>
-                                            )}
-
-                                            {showPracticeSolutions[p.id || idx] && (
-                                                <div className="bg-indigo-800/50 border border-white/10 rounded-[1.5rem] p-6 animate-in slide-in-from-top-4 duration-300 shadow-inner">
-                                                    <div className="space-y-6">
-                                                        <div>
-                                                            <p className="text-[10px] text-indigo-300 font-bold uppercase tracking-widest mb-3">Target Answer</p>
-                                                            <div className="text-lg font-black text-white">{aiData.answer || p.answer || "N/A"}</div>
-                                                        </div>
-                                                        <div>
-                                                            <p className="text-[10px] text-indigo-300 font-bold uppercase tracking-widest mb-3">Model Solution</p>
-                                                            <div className="text-sm text-indigo-50 leading-relaxed font-medium">
-                                                                <LatexRenderer content={aiData.solution || p.solution || ""} block />
+                                                        {practiceAnalysisResults[key] && (
+                                                            <div className="bg-black/20 rounded-2xl p-4 border border-white/5">
+                                                                <div className="flex items-center justify-between mb-3">
+                                                                    <span className="text-[10px] font-black tracking-widest text-indigo-300">AI FEEDBACK</span>
+                                                                    <span className="text-xl font-black">{practiceAnalysisResults[key].score}</span>
+                                                                </div>
+                                                                <div className="p-2 bg-white/5 rounded-lg text-xs text-indigo-50">
+                                                                    <LatexRenderer content={practiceAnalysisResults[key].suggestions || ""} block={false} />
+                                                                </div>
                                                             </div>
-                                                        </div>
+                                                        )}
+                                                        {showPracticeSolutions[key] && (
+                                                            <div className="bg-indigo-800/50 border border-white/10 rounded-2xl p-5 space-y-4">
+                                                                <div>
+                                                                    <p className="text-[10px] text-indigo-300 font-bold uppercase tracking-widest mb-2">Answer</p>
+                                                                    <div className="font-black text-white">{aiData.answer || "N/A"}</div>
+                                                                </div>
+                                                                <div>
+                                                                    <p className="text-[10px] text-indigo-300 font-bold uppercase tracking-widest mb-2">Solution</p>
+                                                                    <div className="text-sm text-indigo-50 leading-relaxed"><LatexRenderer content={aiData.solution || ""} block /></div>
+                                                                </div>
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 </div>
-                                            )}
-                                        </div>
+                                            );
+                                        })}
                                     </div>
-                                );
-                            })}
-                        </div>
-                    )}
+                                )}
+                            </div>
+                        )}
+
+                        {/* History Tab */}
+                        {practiceTab === 'history' && (
+                            <div className="space-y-3">
+                                {loadingHistory && (
+                                    <div className="flex items-center justify-center gap-3 py-16 text-indigo-200">
+                                        <Loader2 className="w-5 h-5 animate-spin" />
+                                        <span>加载历史记录...</span>
+                                    </div>
+                                )}
+                                {!loadingHistory && historySessions.length === 0 && (
+                                    <div className="text-center py-16 text-indigo-300 text-sm">
+                                        暂无历史练习记录。切换到"生成练习"生成第一批练习题吧！
+                                    </div>
+                                )}
+                                {!loadingHistory && historySessions.map((session: any) => (
+                                    <div key={session.id} className="bg-white/10 backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden">
+                                        <button
+                                            onClick={async () => {
+                                                if (expandedSession === session.id) { setExpandedSession(null); return; }
+                                                setExpandedSession(session.id);
+                                                if (!sessionProblems[session.id]) {
+                                                    try {
+                                                        const res = await fetchWithAuth(`/api/practices/sessions/${session.id}`);
+                                                        if (res.ok) {
+                                                            const data = await res.json();
+                                                            setSessionProblems(prev => ({ ...prev, [session.id]: data.problems }));
+                                                        }
+                                                    } catch (e) { console.error(e); }
+                                                }
+                                            }}
+                                            className="w-full flex items-center justify-between p-5 hover:bg-white/5 transition-colors text-left"
+                                        >
+                                            <div className="flex items-center gap-4">
+                                                <div className="w-10 h-10 bg-indigo-500/30 rounded-xl flex items-center justify-center text-indigo-200 font-bold text-sm shrink-0">{session.problem_count}</div>
+                                                <div>
+                                                    <p className="text-white font-bold text-sm">练习批次 #{session.id}</p>
+                                                    <p className="text-indigo-300 text-xs mt-0.5">
+                                                        {new Date(session.created_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                                        {session.ai_model && ` · ${session.ai_model}`}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <ChevronDown className={`w-5 h-5 text-indigo-300 transition-transform duration-200 ${expandedSession === session.id ? 'rotate-180' : ''}`} />
+                                        </button>
+
+                                        {expandedSession === session.id && (
+                                            <div className="border-t border-white/10 p-5 space-y-4">
+                                                {!sessionProblems[session.id] && <div className="flex justify-center py-4"><Loader2 className="w-5 h-5 animate-spin text-indigo-300" /></div>}
+                                                {sessionProblems[session.id]?.map((p: any, idx: number) => {
+                                                    const key = `h_${p.id}`;
+                                                    const aiData = typeof p.ai_analysis === 'string' ? JSON.parse(p.ai_analysis) : (p.ai_analysis || {});
+                                                    return (
+                                                        <div key={p.id} className="bg-white/10 border border-white/10 rounded-2xl p-6">
+                                                            <div className="flex justify-between items-center mb-4">
+                                                                <span className="text-[10px] font-black text-indigo-300 uppercase tracking-wider">题目 #{idx + 1}</span>
+                                                                <button onClick={() => setShowPracticeSolutions(prev => ({ ...prev, [key]: !prev[key] }))} className="flex items-center gap-1.5 text-xs text-indigo-300 hover:text-white transition-colors font-medium">
+                                                                    <Eye className="w-3.5 h-3.5" /> {showPracticeSolutions[key] ? '隐藏' : '查看'}解析
+                                                                </button>
+                                                            </div>
+                                                            <div className="bg-white rounded-xl p-4 text-gray-900 mb-4 min-h-[60px] flex items-center justify-center">
+                                                                <LatexRenderer content={p.latex_content || ""} block />
+                                                            </div>
+                                                            {showPracticeSolutions[key] && (
+                                                                <div className="bg-indigo-800/50 border border-white/10 rounded-xl p-4 space-y-3">
+                                                                    <div>
+                                                                        <p className="text-[10px] text-indigo-300 font-bold uppercase tracking-widest mb-1">答案</p>
+                                                                        <div className="text-white font-bold">{aiData.answer || "N/A"}</div>
+                                                                    </div>
+                                                                    <div>
+                                                                        <p className="text-[10px] text-indigo-300 font-bold uppercase tracking-widest mb-1">解题过程</p>
+                                                                        <div className="text-sm text-indigo-100 leading-relaxed"><LatexRenderer content={aiData.solution || "暂无"} block /></div>
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                            <div className="flex gap-2 mt-3">
+                                                                <label className="flex-grow bg-white/10 hover:bg-white/20 text-white px-4 py-2.5 rounded-xl cursor-pointer transition-all flex items-center justify-center gap-2 font-bold text-xs active:scale-95">
+                                                                    <span>📸</span>{practiceFiles[p.id] ? 'Ready' : '上传作答'}
+                                                                    <input type="file" accept="image/*" className="hidden" onChange={(e) => setPracticeFiles(prev => ({ ...prev, [p.id]: e.target.files?.[0] || null }))} />
+                                                                </label>
+                                                                <button onClick={() => handlePracticeSolutionUpload(p.id, idx)} disabled={!practiceFiles[p.id] || isAnalyzingPractice[p.id]} className="bg-indigo-500 text-white w-10 h-10 rounded-xl hover:bg-indigo-400 disabled:opacity-50 flex items-center justify-center shrink-0">
+                                                                    {isAnalyzingPractice[p.id] ? <Loader2 className="w-4 h-4 animate-spin" /> : <ZoomIn className="w-4 h-4" />}
+                                                                </button>
+                                                            </div>
+                                                            {practiceAnalysisResults[p.id] && (
+                                                                <div className="mt-3 bg-black/20 rounded-xl p-3 text-xs">
+                                                                    <div className="flex items-center justify-between mb-2">
+                                                                        <span className="text-indigo-300 font-bold uppercase tracking-widest text-[10px]">AI FEEDBACK</span>
+                                                                        <span className="font-black text-lg">{practiceAnalysisResults[p.id].score}</span>
+                                                                    </div>
+                                                                    <div className="text-indigo-100"><LatexRenderer content={practiceAnalysisResults[p.id].suggestions || ""} block={false} /></div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
                 </div>
             </div>
 
