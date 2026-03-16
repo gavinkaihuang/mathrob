@@ -1197,3 +1197,133 @@ def get_system_logs(limit: int = 100, db: Session = Depends(get_db)):
             "created_at": l.created_at
         } for l in logs
     ]
+
+# --- Personalized Daily Practice Generation ---
+
+@router.post("/practices/generate_daily")
+async def generate_daily_practice(
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    """
+    [NEW] Generate Personalized Daily Practice via targeted tagging and AI mutation.
+    """
+    from datetime import datetime
+    from sqlalchemy import asc
+    from ..models import UserKnowledgeMastery, Problem, LearningRecord, DailyReview
+    
+    today_date = datetime.utcnow().date()
+    
+    # Check if a practice/review session already exists for today
+    existing_session = db.query(DailyReview).filter(
+        DailyReview.user_id == current_user.id,
+        DailyReview.review_date == today_date
+    ).first()
+    
+    if existing_session:
+        # Just return the count or existing session info
+        return {"status": "success", "message": "Today's review session already generated", "problem_count": len(existing_session.problem_ids)}
+
+    # Step 1: Targeting (Find bottom 2-3 weak tags)
+    weaknesses = db.query(UserKnowledgeMastery).filter(
+        UserKnowledgeMastery.user_id == current_user.id
+    ).order_by(
+        asc(UserKnowledgeMastery.comprehensive_score)
+    ).limit(3).all()
+    
+    target_tags = [w.knowledge_tag for w in weaknesses]
+    
+    if not target_tags:
+        # Fallback if the user has no mastery data established yet
+        return {"status": "error", "message": "No knowledge mastery data found to generate targeted practice"}
+
+    # Step 2: Extraction (Find historical mistakes)
+    selected_problems = []
+    MAX_PROBLEMS = 5
+    
+    # We query the LearningRecord to find mistakes matching the tags
+    for tag in target_tags:
+        if len(selected_problems) >= MAX_PROBLEMS:
+            break
+            
+        # Find problems matching this tag in user's history that are NOT mastered
+        records = db.query(LearningRecord).join(Problem).filter(
+            LearningRecord.user_id == current_user.id,
+            LearningRecord.mastery_level < 3,
+            # In our schema, knowledge_tag might be the direct path or the node name. 
+            # We use a simple ilike to match both possibilities loosely for Extraction
+            Problem.knowledge_path.ilike(f"%{tag}%")
+        ).all()
+        
+        for r in records:
+            if r.problem_id not in [p.id for p in selected_problems]:
+                selected_problems.append(r.problem)
+                if len(selected_problems) >= MAX_PROBLEMS:
+                    break
+
+    # Step 3: Mutation (Generate remaining problems via AI)
+    deficit = MAX_PROBLEMS - len(selected_problems)
+    
+    if deficit > 0 and len(selected_problems) > 0:
+        # We have at least 1 mistake to base the AI generation on
+        base_problem = selected_problems[0]
+        base_latex = base_problem.latex_content
+        target_tag = target_tags[0] 
+        
+        try:
+            ai_data = await ai_service.generate_variation(
+                original_latex=base_latex,
+                knowledge_tag=target_tag,
+                quantity=deficit,
+                difficulty=base_problem.difficulty or 3
+            )
+            
+            ai_problems = ai_data.get("problems", [])
+            for ai_prob in ai_problems:
+                new_prob = Problem(
+                    latex_content=ai_prob.get("question", ""),
+                    text_content=ai_prob.get("question", ""),
+                    difficulty=base_problem.difficulty or 3,
+                    knowledge_path=target_tag,
+                    source="AI Generated Variation",
+                    is_public=False,
+                    ai_analysis={
+                        "solution": ai_prob.get("solution", ""),
+                        "thinking_process": ai_prob.get("hint", "")
+                    }
+                )
+                db.add(new_prob)
+                db.flush() # Flush to get the ID
+                selected_problems.append(new_prob)
+                
+                # Create a LearningRecord for the new problem so it shows up in reviews
+                new_record = LearningRecord(
+                    user_id=current_user.id,
+                    problem_id=new_prob.id,
+                    status="pending",
+                    difficulty_rating=new_prob.difficulty
+                )
+                db.add(new_record)
+                
+        except Exception as e:
+            print(f"Failed to generate AI variations for daily practice: {e}")
+            pass # Keep going with whatever problems we did find
+            
+    # Assembly: Compile into today's DailyReview
+    final_ids = [p.id for p in selected_problems]
+    
+    if final_ids:
+        new_daily_review = DailyReview(
+            user_id=current_user.id,
+            review_date=today_date,
+            problem_ids=final_ids
+        )
+        db.add(new_daily_review)
+        db.commit()
+    
+    return {
+        "status": "success", 
+        "target_tags_focused": target_tags,
+        "problems_assembled": len(final_ids),
+        "ai_mutations_generated": deficit if deficit > 0 else 0
+    }

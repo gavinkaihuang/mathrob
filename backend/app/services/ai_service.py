@@ -456,6 +456,83 @@ class AIService:
             self._log_system_error("utility", f"Practice Generation Failed: {str(e)}", {"traceback": traceback.format_exc()})
             return {"problems": [], "error": str(e)}
 
+    async def generate_variation(self, original_latex: str, knowledge_tag: str, quantity: int, difficulty: int = 1) -> Dict[str, Any]:
+        """
+        [NEW] Mutates an existing problem to dynamically generate practice variations, focusing heavily on a specific `knowledge_tag` deficit.
+        """
+        prompt = f"""
+        # Role
+        你是一个资深的数学教研专家。学生目前在【{knowledge_tag}】上存在薄弱环节。
+
+        # Task
+        请根据以下他曾经做错的原题，生成 {quantity} 道难度相当、考察重点相似的“变式训练题”。
+
+        # Context
+        - Original Problem (LaTeX): {original_latex}
+        - Target Knowledge Tag: {knowledge_tag}
+        - Difficulty: {difficulty} (1-5)
+
+        # Generation Guidelines (STRICT)
+        1. 这 {quantity} 道题目必须紧紧围绕【{knowledge_tag}】这个薄弱点来进行定点攻克。
+        2. 不要只是简单地改数字，可以适度变化考察的具体形态或切入角度。
+        3. 必须保证数学推导的绝对严谨，且存在唯一解。
+        4. 语言使用简体中文。
+        
+        # Format Requirements
+        - 使用标准的 LaTeX 语法编写数学公式！务必将所有的公式包裹在【单美元符号 `$`】之中。
+        - 确保 JSON 中的斜杠正确转义 (如 `\\\\frac`)。
+        - 请务必返回合法的 JSON 结构，严格遵从下方示例。
+        
+        # Output Schema
+        {{
+            "problems": [
+                {{
+                    "question": "题干的 LaTeX",
+                    "hint": "思路提示的简短文本",
+                    "solution": "详细的标准解答（LaTeX格式）",
+                    "knowledge_points": ["核心考点1", "核心考点2"]
+                }}
+            ]
+        }}
+        """
+
+        try:
+            # Reusing UTILITY/REASONING logic since we are generating varied practice problems
+            text, used_model, used_token = await self.call_gemini_with_fallback('utility', prompt)
+            
+            text = re.sub(r'```json\n|\n```', '', text).strip()
+            
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError as je:
+                print(f"generate_variation JSON parse failed: {je}")
+                try:
+                    data = json.loads(text, strict=False)
+                except Exception as e2:
+                    escaped_text = text.replace('\\', '\\\\')
+                    escaped_text = escaped_text.replace('\\\\"', '\\"')
+                    escaped_text = escaped_text.replace('\\\\n', '\\n')
+                    escaped_text = escaped_text.replace('\\\\t', '\\t')
+                    data = json.loads(escaped_text, strict=False)
+            
+            problems = data.get("problems", [])
+            for item in problems:
+                if 'question' in item:
+                    item['question'] = self._fix_latex(item['question'])
+                if 'solution' in item:
+                    item['solution'] = self._fix_latex(item['solution'])
+            
+            self._log_api_call("UTILITY", "GENERATE_VARIATION", used_model, used_token)
+            
+            return {
+                "problems": problems,
+                "ai_model": used_model
+            }
+        except Exception as e:
+            print(f"Error generating variation: {e}")
+            self._log_system_error("utility", f"generate_variation Failed: {str(e)}", {"traceback": traceback.format_exc()})
+            return {"problems": [], "error": str(e)}
+
     async def analyze_solution(self, problem_latex: str, standard_solution: str, solution_image_path: str, target_id: int = None):
         """
         Analyzes a student's handwritten solution against the problem and standard solution.
