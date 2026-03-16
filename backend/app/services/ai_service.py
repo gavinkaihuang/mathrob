@@ -601,3 +601,51 @@ class AIService:
                 "calculation_errors": ["Error processing solution analysis"],
                 "suggestions": f"Analysis failed: {str(e)}"
             }
+
+    async def generate_diagnostic_report(self, learned_topics: List[str], assessment_results: List[Dict[str, Any]]) -> str:
+        """
+        [NEW] Generates a comprehensive markdown diagnostic report after an Assessment Session.
+        """
+        
+        topics_str = ", ".join(learned_topics) if learned_topics else "全部已学知识点"
+        results_json_str = json.dumps(assessment_results, ensure_ascii=False, indent=2)
+        
+        prompt = f"""
+        # Role
+        你是一位资深教研专家。学生刚刚完成了一次摸底测验。你需要根据他的测验表现，生成一份专业的学情诊断报告。
+
+        # Context
+        - 测试范围 (Learned Topics): {topics_str}
+        - 测验表现与具体反馈 (Results JSON): 
+        {results_json_str}
+
+        # Reporting Guidelines (STRICT)
+        1. 严禁对未包含在“测试范围”内的知识点进行评价。
+        2. 基于本次摸底测验的真实得分、逻辑漏洞 (logic_gaps) 和计算错误 (calculation_errors)，给出针对性的知识点攻克优先级。
+        3. 综合评估其卷面规范程度 (综合 formatting_feedback)。
+        4. 使用极具亲和力但专业的口吻。
+        5. 必须输出一份排版清晰、带有数学 LaTeX 公式的 Markdown 文档（公式需使用 `$` 包裹）。
+        
+        # Output Format
+        直接返回纯 Markdown 文本，无需任何额外的代码块包装（如 ````markdown`）。包含以下模块：
+        - 🌟 **总体评价** (Overall Assessment)
+        - 📊 **核心表现诊断** (Performance Breakdown)
+        - ⚠️ **重灾区预警** (Priority Weaknesses)
+        - 📝 **卷面与考学习惯** (Presentation & Habits)
+        - 🚀 **下一步突击计划** (Actionable Next Steps)
+        """
+        
+        try:
+            # Report generation requires strong reasoning, route to TEACHING model
+            text, used_model, used_token = await self.call_gemini_with_fallback('teaching', prompt)
+            
+            # Clean possible markdown wrap
+            text = text.removeprefix("```markdown\n").removesuffix("\n```").strip()
+            
+            self._log_api_call("TEACHING", "GENERATE_DIAGNOSTIC_REPORT", used_model, used_token)
+            return text
+            
+        except Exception as e:
+            print(f"Error generating diagnostic report: {e}")
+            self._log_system_error("teaching", f"generate_diagnostic_report Failed: {str(e)}", {"traceback": traceback.format_exc()})
+            return f"生成诊断报告失败: {str(e)}"

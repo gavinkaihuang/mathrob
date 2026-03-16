@@ -155,6 +155,35 @@ class UserKnowledgeMastery(Base):
 
     user = relationship("User", backref="knowledge_mastery_records")
 
+    user = relationship("User", backref="knowledge_mastery_records")
+
+class AssessmentSession(Base):
+    __tablename__ = "assessment_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    status = Column(String(50), default="in_progress") # in_progress, completed
+    overall_score = Column(Float, nullable=True) # Computed at the end
+    report_markdown = Column(Text, nullable=True) # AI generated report
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    user = relationship("User", backref="assessment_sessions")
+    problems = relationship("AssessmentProblem", back_populates="session", cascade="all, delete")
+
+class AssessmentProblem(Base):
+    __tablename__ = "assessment_problems"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("assessment_sessions.id"), nullable=False, index=True)
+    problem_id = Column(Integer, ForeignKey("problems.id"), nullable=False)
+    image_path = Column(String(255), nullable=True) # User's upload
+    ai_score = Column(Float, nullable=True) # Graded score
+    ai_feedback = Column(JSON, nullable=True) # Full grading json
+    is_submitted = Column(Boolean, default=False)
+    
+    session = relationship("AssessmentSession", back_populates="problems")
+    problem = relationship("Problem")
 
 class WeeklyReport(Base):
     __tablename__ = "weekly_reports"

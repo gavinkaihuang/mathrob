@@ -1327,3 +1327,350 @@ async def generate_daily_practice(
         "problems_assembled": len(final_ids),
         "ai_mutations_generated": deficit if deficit > 0 else 0
     }
+
+# --- Diagnostic Assessment ---
+
+@router.post("/assessment/generate_test")
+async def generate_diagnostic_test(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Generate a new diagnostic test based on UserProgress (Learned Topics).
+    """
+    from ..models import UserProgress, Problem, AssessmentSession, AssessmentProblem
+    from sqlalchemy import func
+    
+    # 1. Fetch learned topics
+    learned_progress = db.query(UserProgress).filter(
+        UserProgress.user_id == current_user.id,
+        UserProgress.is_learned == True
+    ).all()
+    
+    # We should use Chinese knowledge names for AI generation / DB lookups
+    # because knowledge_path stores ID codes like SH_MATH.01
+    # Build a path -> name map by querying the knowledge_nodes table
+    from sqlalchemy import text as sql_text
+    try:
+        rows = db.execute(sql_text("SELECT name, path::text FROM knowledge_nodes")).fetchall()
+        path_to_name = {row[1]: row[0] for row in rows}
+    except Exception:
+        # If knowledge_nodes table doesn't exist, use the path directly
+        path_to_name = {}
+
+    all_paths = [p.knowledge_path for p in learned_progress]
+    
+    # Filter out parent nodes (if a longer path starts with this path + '.', it's a parent)
+    leaf_entries = []
+    for p in learned_progress:
+        is_parent = any(other.startswith(p.knowledge_path + '.') for other in all_paths if other != p.knowledge_path)
+        if not is_parent:
+            name = path_to_name.get(p.knowledge_path, p.knowledge_path)  # Fallback to path if no name found
+            leaf_entries.append((p.knowledge_path, name))
+    
+    if not leaf_entries:
+        raise HTTPException(status_code=400, detail="No specific learned topics found. Please expand the tree and mark specific topics as learned.")
+        
+    # Limit to a maximum of 8 random topics to avoid overloaded tests
+    import random
+    if len(leaf_entries) > 8:
+        leaf_entries = random.sample(leaf_entries, 8)
+        
+    # 2. Extract representative problems
+    session_problems = []
+    
+    # We need the AI service locally if we fall back
+    from ..main import ai_service
+    import random
+    
+    for topic_path, topic_name in leaf_entries:
+        # Get 1 random problem that matches this topic's path code (e.g. SH_MATH.01.01)
+        prob = db.query(Problem).filter(
+            Problem.knowledge_path == topic_path
+        ).order_by(func.random()).first()
+        
+        if not prob:
+            # Try a broader prefix match (e.g. problems tagged under SH_MATH.01.01 might match SH_MATH.01)
+            prob = db.query(Problem).filter(
+                Problem.knowledge_path.ilike(f"{topic_path}%")
+            ).order_by(func.random()).first()
+            
+        if prob and prob.id not in [p.id for p in session_problems]:
+            session_problems.append(prob)
+        elif not prob:
+            # Fallback: Dynamically generate an unseen problem using Gemini!
+            try:
+                # Generate dynamic problem using Gemini
+                prompt = f"""
+                生成一道全新的高中数学题目，考察的核心知识点是：{topic_name}。
+                要求难度适中（3-4颗星），必须以规范的 JSON 格式直接输出。包括以下字段：
+                - id: 临时填 0
+                - subject: "数学"
+                - chapter: "{topic_name}"
+                - knowledge_node_name: "{topic_name}"
+                - knowledge_path: "{topic_name}"
+                - difficulty: 3
+                - latex_content: "题目的LaTeX原始内容"
+                - answer: "最终答案"
+                - explanation: "详细解析"
+                - options: [] (如果不是选择题，填空数组)
+
+                请直接输出合法的JSON对象（不要使用markdown代码块包装）。
+                """
+                
+                # Use 'teaching' role since it's the standard generation model configured
+                text, _, _ = await ai_service.call_gemini_with_fallback('teaching', prompt)
+                
+                # Cleanup JSON
+                text = text.strip()
+                if text.startswith("```json"):
+                    text = text[7:]
+                if text.startswith("```"):
+                    text = text[3:]
+                if text.endswith("```"):
+                    text = text[:-3]
+                
+                import json
+                gen_data = json.loads(text.strip())
+                
+                # Save this dynamic problem to DB permanently
+                new_prob = Problem(
+                    user_id=current_user.id,
+                    image_path="system_generated/diagnostic", # Image is required but this is AI generated text-only
+                    latex_content=gen_data.get("latex_content", ""),
+                    difficulty=gen_data.get("difficulty", 3),
+                    knowledge_path=topic_path,
+                    ai_model="teaching",
+                    ai_analysis={
+                        "answer": gen_data.get("answer", ""),
+                        "explanation": gen_data.get("explanation", ""),
+                        "options": gen_data.get("options", []),
+                        "chapter": gen_data.get("chapter", "")
+                    }
+                )
+                db.add(new_prob)
+                db.flush() # flush to get the brand new id
+                session_problems.append(new_prob)
+                
+            except Exception as e:
+                print(f"Failed to dynamic fallback generate for {topic_name}: {e}")
+                # Skip if generation fails
+                pass
+            
+    if not session_problems:
+        raise HTTPException(status_code=400, detail="本地题库该知识点为空，且自动向 AI 请求生成题目遇到网络波动。请稍后重试。")
+        
+    # Limit test length (max 10 questions)
+    if len(session_problems) > 10:
+        session_problems = random.sample(session_problems, 10)
+        
+    # 3. Create Session
+    new_session = AssessmentSession(
+        user_id=current_user.id,
+        status="in_progress"
+    )
+    db.add(new_session)
+    db.flush() # flush to get ID
+    
+    # 4. Attach Problems
+    for prob in session_problems:
+        ap = AssessmentProblem(
+            session_id=new_session.id,
+            problem_id=prob.id
+        )
+        db.add(ap)
+        
+    db.commit()
+    
+    return {
+        "status": "success",
+        "session_id": new_session.id,
+        "problem_count": len(session_problems),
+        "topics_covered": len(leaf_entries)
+    }
+
+@router.get("/assessment/{session_id}")
+async def get_assessment_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Fetch the details and problems of an assessment session.
+    """
+    from ..models import AssessmentSession, AssessmentProblem
+    
+    session = db.query(AssessmentSession).filter(
+        AssessmentSession.id == session_id,
+        AssessmentSession.user_id == current_user.id
+    ).first()
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Assessment session not found")
+        
+    problems = db.query(AssessmentProblem).filter(AssessmentProblem.session_id == session_id).all()
+    
+    items = []
+    for ap in problems:
+        items.append({
+            "id": ap.problem_id,
+            "latex_content": ap.problem.latex_content,
+            "knowledge_path": ap.problem.knowledge_path,
+            "is_submitted": ap.is_submitted,
+            "ai_score": ap.ai_score,
+            "ai_feedback": ap.ai_feedback
+        })
+        
+    return {
+        "id": session.id,
+        "status": session.status,
+        "overall_score": session.overall_score,
+        "report_markdown": session.report_markdown,
+        "problems": items
+    }
+
+@router.post("/assessment/{session_id}/problems/{problem_id}/submit")
+async def submit_assessment_problem(
+    session_id: int,
+    problem_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    from ..models import AssessmentSession, AssessmentProblem, Problem
+    import shutil
+    import uuid
+    import time
+    
+    # Verify session and problem
+    session = db.query(AssessmentSession).filter(
+        AssessmentSession.id == session_id,
+        AssessmentSession.user_id == current_user.id,
+        AssessmentSession.status == "in_progress"
+    ).first()
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Active Assessment session not found")
+        
+    ap = db.query(AssessmentProblem).filter(
+        AssessmentProblem.session_id == session_id,
+        AssessmentProblem.problem_id == problem_id
+    ).first()
+    
+    if not ap:
+        raise HTTPException(status_code=404, detail="Problem not found in this assessment")
+        
+    problem = db.query(Problem).filter(Problem.id == problem_id).first()
+        
+    # Save Image
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    file_ext = os.path.splitext(file.filename)[1]
+    filename = f"assess_{session_id}_{problem_id}_{uuid.uuid4().hex[:8]}_{int(time.time())}{file_ext}"
+    file_location = os.path.join(UPLOAD_DIR, filename)
+
+    with open(file_location, "wb+") as file_object:
+        shutil.copyfileobj(file.file, file_object)
+        
+    # Get Standard Solution for AI compare
+    problem_latex = problem.latex_content or "N/A"
+    standard_solution = "N/A"
+    if problem.ai_analysis:
+        if isinstance(problem.ai_analysis, dict):
+            standard_solution = problem.ai_analysis.get("solution", "N/A")
+        elif isinstance(problem.ai_analysis, str):
+            standard_solution = problem.ai_analysis
+
+    # Call AI Grader
+    try:
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem.id)
+        feedback = ai_response["feedback_json"]
+        score = feedback.get("score", 0)
+    except AIServiceException as e:
+        status_code = 429 if e.error_type == "rate_limit" else 401 if e.error_type == "auth_error" else 503
+        raise HTTPException(
+            status_code=status_code, 
+            detail={"message": e.args[0], "error_type": e.error_type, "retry_seconds": e.retry_seconds}
+        )
+    except Exception as e:
+        feedback = {"score": 0, "error": str(e)}
+        score = 0
+        
+    # Update DB
+    ap.image_path = filename
+    ap.ai_score = float(score)
+    ap.ai_feedback = feedback
+    ap.is_submitted = True
+    db.commit()
+    
+    return {
+        "status": "success",
+        "ai_score": score,
+        "ai_feedback": feedback
+    }
+
+@router.post("/assessment/{session_id}/finalize")
+async def finalize_assessment(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    from ..models import AssessmentSession, AssessmentProblem, UserProgress
+    from datetime import datetime
+    
+    session = db.query(AssessmentSession).filter(
+        AssessmentSession.id == session_id,
+        AssessmentSession.user_id == current_user.id,
+        AssessmentSession.status == "in_progress"
+    ).first()
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Active Assessment session not found")
+        
+    problems = db.query(AssessmentProblem).filter(AssessmentProblem.session_id == session_id).all()
+    
+    total_score = 0
+    results_payload = []
+    
+    for ap in problems:
+        if ap.is_submitted and ap.ai_feedback:
+            total_score += ap.ai_score or 0
+            results_payload.append({
+                "problem_knowledge_tag": ap.problem.knowledge_path,
+                "score": ap.ai_score,
+                "logic_gaps": ap.ai_feedback.get("logic_gaps", []),
+                "calculation_errors": ap.ai_feedback.get("calculation_errors", []),
+                "formatting_feedback": ap.ai_feedback.get("formatting_feedback", ""),
+                "knowledge_analysis": ap.ai_feedback.get("knowledge_analysis", [])
+            })
+            
+    # Compile prompt data
+    learned_progress = db.query(UserProgress).filter(
+        UserProgress.user_id == current_user.id,
+        UserProgress.is_learned == True
+    ).all()
+    learned_paths = [p.knowledge_path for p in learned_progress]
+    
+    # Fire Gemini Report Generator
+    try:
+        report_md = await ai_service.generate_diagnostic_report(
+            learned_topics=learned_paths,
+            assessment_results=results_payload
+        )
+    except Exception as e:
+        report_md = f"Error generating report: {str(e)}"
+        
+    # Update Session
+    final_score = total_score / len(problems) if problems else 0
+    session.overall_score = final_score
+    session.status = "completed"
+    session.completed_at = datetime.utcnow()
+    session.report_markdown = report_md
+    
+    db.commit()
+    
+    return {
+        "status": "success",
+        "session_id": session.id,
+        "overall_score": final_score,
+        "report_markdown": report_md
+    }
