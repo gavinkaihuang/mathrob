@@ -135,11 +135,26 @@ class SolutionAttempt(Base):
     ai_model_used = Column(String(100), nullable=True) # The model that performed this specific grading
     ai_score = Column(Float, nullable=True) # System-given score
     ai_evaluation = Column(JSON, nullable=True) # Detailed correction evaluation (copy of feedback_json or subset)
+    formatting_feedback = Column(Text, nullable=True) # Feedback related to writing and format
     feedback_json = Column(JSON, nullable=True) # { score: int, logic_gaps: [], calculation_errors: [], suggestions: [], formatting_feedback: str }
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", backref="solution_attempts")
     problem = relationship("Problem", back_populates="solution_attempts")
+
+class UserKnowledgeMastery(Base):
+    __tablename__ = "user_knowledge_mastery"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    knowledge_tag = Column(String, index=True, nullable=False)
+    user_self_rating = Column(Float, nullable=True) # 1=Won't, 2=Half, 3=Mastered
+    ai_assessed_rating = Column(Float, nullable=True) # AI Objective Score 1-10
+    comprehensive_score = Column(Float, nullable=True) # Computed score
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", backref="knowledge_mastery_records")
+
 
 class WeeklyReport(Base):
     __tablename__ = "weekly_reports"

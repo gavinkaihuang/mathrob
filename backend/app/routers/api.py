@@ -22,6 +22,7 @@ class SolutionAttemptSchema(BaseModel):
     ai_model_used: Optional[str] = None
     ai_score: Optional[float] = None
     ai_evaluation: Optional[Union[dict, str]] = None
+    formatting_feedback: Optional[str] = None
     feedback_json: Optional[Union[dict, str]] = None
     created_at: datetime
     
@@ -204,6 +205,35 @@ def update_mastery(problem_id: int, request: MasteryRequest, db: Session = Depen
     else:
         record.status = "wrong"
         
+    # Sync UserKnowledgeMastery
+    from ..models import UserKnowledgeMastery, KnowledgeNode
+    if problem.knowledge_path and problem.knowledge_path != "unknown":
+        node = db.query(KnowledgeNode).filter(KnowledgeNode.path == problem.knowledge_path).first()
+        tag = node.name if node else problem.knowledge_path
+        
+        ukm = db.query(UserKnowledgeMastery).filter(
+            UserKnowledgeMastery.user_id == current_user.id,
+            UserKnowledgeMastery.knowledge_tag == tag
+        ).first()
+        
+        if not ukm:
+            ukm = UserKnowledgeMastery(
+                user_id=current_user.id,
+                knowledge_tag=tag,
+                user_self_rating=float(request.level)
+            )
+            db.add(ukm)
+        else:
+            old_rating = ukm.user_self_rating or float(request.level)
+            ukm.user_self_rating = 0.5 * float(request.level) + 0.5 * old_rating
+            
+        # recalculate
+        norm_self = (ukm.user_self_rating / 3.0) * 10.0
+        if ukm.ai_assessed_rating:
+            ukm.comprehensive_score = 0.6 * ukm.ai_assessed_rating + 0.4 * norm_self
+        else:
+            ukm.comprehensive_score = norm_self
+
     db.commit()
     
     return {
@@ -293,6 +323,38 @@ async def review_problem(
     record.mastery_level = score # Sync with UI selection
     record.status = "correct" if score == 2 else "wrong" # Basic status sync
     
+    # Map score (0,1,2) to level (1,2,3)
+    user_self_rating = score + 1
+    
+    # Sync UserKnowledgeMastery
+    from ..models import UserKnowledgeMastery, KnowledgeNode
+    if problem.knowledge_path and problem.knowledge_path != "unknown":
+        node = db.query(KnowledgeNode).filter(KnowledgeNode.path == problem.knowledge_path).first()
+        tag = node.name if node else problem.knowledge_path
+        
+        ukm = db.query(UserKnowledgeMastery).filter(
+            UserKnowledgeMastery.user_id == current_user.id,
+            UserKnowledgeMastery.knowledge_tag == tag
+        ).first()
+        
+        if not ukm:
+            ukm = UserKnowledgeMastery(
+                user_id=current_user.id,
+                knowledge_tag=tag,
+                user_self_rating=float(user_self_rating)
+            )
+            db.add(ukm)
+        else:
+            old_rating = ukm.user_self_rating or float(user_self_rating)
+            ukm.user_self_rating = 0.5 * float(user_self_rating) + 0.5 * old_rating
+            
+        # recalculate
+        norm_self = (ukm.user_self_rating / 3.0) * 10.0
+        if ukm.ai_assessed_rating:
+            ukm.comprehensive_score = 0.6 * ukm.ai_assessed_rating + 0.4 * norm_self
+        else:
+            ukm.comprehensive_score = norm_self
+
     db.commit()
     db.refresh(record)
     
@@ -611,6 +673,108 @@ async def submit_solution(
     
     return attempt
 
+@router.post("/api/reviews/{session_id}/problems/{problem_id}/submit_homework", response_model=SolutionAttemptSchema)
+async def submit_homework(
+    session_id: int,
+    problem_id: int, 
+    file: UploadFile = File(...), 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    from ..models import UserKnowledgeMastery
+    
+    problem = db.query(Problem).filter(Problem.id == problem_id, Problem.user_id == current_user.id).first()
+    if not problem:
+        raise HTTPException(status_code=404, detail="Problem not found")
+        
+    # Save file
+    safe_filename = f"homework_{problem_id}_{int(datetime.utcnow().timestamp())}_{file.filename}"
+    file_location = os.path.join(UPLOAD_DIR, safe_filename)
+    
+    with open(file_location, "wb") as buffer:
+        content = await file.read()
+        buffer.write(content)
+        
+    # Prepare context for AI
+    problem_latex = problem.latex_content or "N/A"
+    standard_solution = "N/A"
+    
+    if problem.ai_analysis:
+        if isinstance(problem.ai_analysis, dict):
+            standard_solution = problem.ai_analysis.get("solution", "N/A")
+        elif isinstance(problem.ai_analysis, str):
+            standard_solution = problem.ai_analysis
+            
+    # Call AI
+    try:
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id)
+        feedback = ai_response["feedback_json"]
+        used_model = ai_response["ai_model"]
+    except AIServiceException as e:
+        status_code = 429 if e.error_type == "rate_limit" else 401 if e.error_type == "auth_error" else 503
+        raise HTTPException(
+            status_code=status_code, 
+            detail={"message": e.args[0], "error_type": e.error_type, "retry_seconds": e.retry_seconds}
+        )
+    except Exception as e:
+        print(f"AI Analysis failed: {e}")
+        feedback = {"score": 0, "error": str(e)}
+        used_model = "error"
+        
+    # Save Attempt
+    attempt = SolutionAttempt(
+        problem_id=problem_id,
+        user_id=current_user.id,
+        image_path=safe_filename,
+        ai_model_used=used_model,
+        ai_score=feedback.get("score") if isinstance(feedback, dict) else None,
+        ai_evaluation=feedback,
+        formatting_feedback=feedback.get("formatting_feedback") if isinstance(feedback, dict) else None,
+        feedback_json=feedback
+    )
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
+    
+    # Process knowledge mastery if exist
+    if isinstance(feedback, dict) and "knowledge_analysis" in feedback:
+        analyses = feedback.get("knowledge_analysis", [])
+        for ki in analyses:
+            tag = ki.get("tag")
+            score = ki.get("score") # 1-10
+            if tag and score is not None:
+                record = db.query(UserKnowledgeMastery).filter(
+                    UserKnowledgeMastery.user_id == current_user.id,
+                    UserKnowledgeMastery.knowledge_tag == tag
+                ).first()
+                if not record:
+                    record = UserKnowledgeMastery(
+                        user_id=current_user.id,
+                        knowledge_tag=tag,
+                        ai_assessed_rating=float(score)
+                    )
+                    db.add(record)
+                else:
+                    # Rolling average for ai_assessed_rating, or just overwrite?
+                    # I'll use a weighted average favoring newer: new = 0.7 * new + 0.3 * old
+                    old_score = record.ai_assessed_rating or float(score)
+                    record.ai_assessed_rating = 0.7 * float(score) + 0.3 * old_score
+                
+                # Update comprehensive score
+                user_self = record.user_self_rating # 1-3
+                if user_self:
+                    # Map 1-3 to 1-10 scale: 1 -> 3.33, 2 -> 6.66, 3 -> 10 
+                    normalized_self = (user_self / 3.0) * 10.0
+                    ai_rating = record.ai_assessed_rating
+                    record.comprehensive_score = 0.6 * ai_rating + 0.4 * normalized_self
+                else:
+                    record.comprehensive_score = record.ai_assessed_rating
+                    
+        db.commit()
+    
+    return attempt
+
+
 
 @router.delete("/solution-attempts/{attempt_id}")
 async def delete_solution_attempt(attempt_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -727,11 +891,20 @@ def get_today_reviews(db: Session = Depends(get_db), current_user: User = Depend
                     LearningRecord.problem_id == p.id
                 ).first()
                 if rec:
+                    from ..models import UserKnowledgeMastery
                     node_name = None
+                    comp_score = None
                     if p.knowledge_path and p.knowledge_path != "unknown":
                         node = db.query(KnowledgeNode).filter(KnowledgeNode.path == p.knowledge_path).first()
                         if node:
                             node_name = node.name
+                        tag = node_name if node_name else p.knowledge_path
+                        ukm = db.query(UserKnowledgeMastery).filter(
+                            UserKnowledgeMastery.user_id == current_user.id,
+                            UserKnowledgeMastery.knowledge_tag == tag
+                        ).first()
+                        if ukm:
+                            comp_score = ukm.comprehensive_score
 
                     item = {
                         "id": p.id,
@@ -739,6 +912,7 @@ def get_today_reviews(db: Session = Depends(get_db), current_user: User = Depend
                         "difficulty": p.difficulty or 0,
                         "knowledge_path": p.knowledge_path or "unknown",
                         "knowledge_node_name": node_name,
+                        "comprehensive_score": comp_score,
                         "ai_analysis": p.ai_analysis,
                         "trigger_variant": (rec.ease_factor or 2.5) >= 2.8,
                         "mastery_level": rec.mastery_level or 0
@@ -769,11 +943,20 @@ def get_today_reviews(db: Session = Depends(get_db), current_user: User = Depend
         if not p:
             continue
             
+        from ..models import UserKnowledgeMastery
         node_name = None
+        comp_score = None
         if p.knowledge_path and p.knowledge_path != "unknown":
             node = db.query(KnowledgeNode).filter(KnowledgeNode.path == p.knowledge_path).first()
             if node:
                 node_name = node.name
+            tag = node_name if node_name else p.knowledge_path
+            ukm = db.query(UserKnowledgeMastery).filter(
+                UserKnowledgeMastery.user_id == current_user.id,
+                UserKnowledgeMastery.knowledge_tag == tag
+            ).first()
+            if ukm:
+                comp_score = ukm.comprehensive_score
 
         item = {
             "id": p.id,
@@ -781,6 +964,7 @@ def get_today_reviews(db: Session = Depends(get_db), current_user: User = Depend
             "difficulty": p.difficulty or 0,
             "knowledge_path": p.knowledge_path or "unknown",
             "knowledge_node_name": node_name,
+            "comprehensive_score": comp_score,
             "ai_analysis": p.ai_analysis,
             "trigger_variant": (rec.ease_factor or 2.5) >= 2.8,
             "mastery_level": rec.mastery_level or 0

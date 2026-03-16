@@ -13,6 +13,7 @@ interface ReviewItem {
     difficulty: number;
     knowledge_path: string;
     knowledge_node_name?: string;
+    comprehensive_score?: number;
     ai_analysis: any;
     trigger_variant: boolean;
     mastery_level: number;
@@ -24,6 +25,8 @@ export default function ReviewPage() {
     const [showAnswer, setShowAnswer] = useState(false);
     const [loading, setLoading] = useState(true);
     const [updating, setUpdating] = useState(false);
+    const [uploading, setUploading] = useState(false);
+    const [reports, setReports] = useState<Record<number, any>>({});
     const [error, setError] = useState<string | null>(null);
     const router = useRouter();
 
@@ -96,6 +99,39 @@ export default function ReviewPage() {
             console.error("Error updating mastery", err);
         } finally {
             setUpdating(false);
+        }
+    };
+
+    const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (!e.target.files || e.target.files.length === 0 || !items[currentIndex]) return;
+        
+        const file = e.target.files[0];
+        const problemId = items[currentIndex].id;
+        
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        setUploading(true);
+        try {
+            const res = await fetchWithAuth(`/api/reviews/0/problems/${problemId}/submit_homework`, {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (res.ok) {
+                const data = await res.json();
+                setReports(prev => ({ ...prev, [problemId]: data }));
+                // Re-fetch to update comprehensive_score from backend
+                await loadTodayReviews();
+            } else {
+                alert('上传作业或批改失败');
+            }
+        } catch (err) {
+            console.error('Upload Error:', err);
+            alert('网络错误');
+        } finally {
+            setUploading(false);
+            if (e.target) e.target.value = '';
         }
     };
 
@@ -197,9 +233,21 @@ export default function ReviewPage() {
                                                 </span>
                                             )}
                                         </div>
-                                        <div className="text-xs font-bold text-slate-500 truncate bg-slate-100 w-fit px-2 py-1 rounded">
-                                            {item.knowledge_node_name || item.knowledge_path.split('/').pop() || '综合考点'}
-                                        </div>
+                                        {(() => {
+                                            const score = item.comprehensive_score;
+                                            let badgeColor = 'bg-slate-100 text-slate-500';
+                                            if (score !== undefined && score !== null) {
+                                                if (score < 6) badgeColor = 'bg-red-100 text-red-600';
+                                                else if (score <= 8) badgeColor = 'bg-yellow-100 text-yellow-600';
+                                                else badgeColor = 'bg-green-100 text-green-600';
+                                            }
+                                            return (
+                                                <div className={`text-xs font-bold truncate w-fit px-2 py-1 rounded ${badgeColor} transition-colors`}>
+                                                    {item.knowledge_node_name || item.knowledge_path.split('/').pop() || '综合考点'}
+                                                    {score !== undefined && score !== null && ` (${score.toFixed(1)}分)`}
+                                                </div>
+                                            );
+                                        })()}
                                     </div>
                                     {isActive && (
                                         <ChevronRight className="w-5 h-5 text-indigo-400 self-center" />
@@ -247,6 +295,78 @@ export default function ReviewPage() {
                                 <LatexRenderer content={currentItem.latex_content} block />
                             </div>
                         </motion.div>
+
+                        {/* Homework Upload and Report Area */}
+                        <div className="mb-8">
+                            <div className="flex items-center justify-between mb-4">
+                                <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                                    <span className="text-indigo-600">📝</span> AI 智能批改
+                                </h3>
+                                <div>
+                                    <input
+                                        type="file"
+                                        id="homework-upload"
+                                        className="hidden"
+                                        accept="image/*"
+                                        onChange={handleFileUpload}
+                                        disabled={uploading}
+                                    />
+                                    <label
+                                        htmlFor="homework-upload"
+                                        className={`cursor-pointer px-5 py-2 rounded-xl font-bold text-sm transition-all shadow-sm border ${uploading ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed' : 'bg-white text-indigo-600 border-indigo-200 hover:bg-indigo-50 hover:border-indigo-300'}`}
+                                    >
+                                        {uploading ? "正在批改中..." : "上传我的解答"}
+                                    </label>
+                                </div>
+                            </div>
+                            
+                            {/* AI Grading Report Card */}
+                            {reports[currentItem.id] && (
+                                <motion.div
+                                    initial={{ opacity: 0, height: 0 }}
+                                    animate={{ opacity: 1, height: 'auto' }}
+                                    className="bg-indigo-50/50 rounded-2xl p-6 border border-indigo-100 mb-6"
+                                >
+                                    <div className="flex items-center justify-between border-b border-indigo-100 pb-4 mb-4">
+                                        <h4 className="font-black text-indigo-900">AI 批改报告</h4>
+                                        <div className="text-xl font-black text-indigo-600 bg-white px-3 py-1 rounded-lg border border-indigo-100 shadow-sm">
+                                            {reports[currentItem.id].ai_score?.toFixed(0) || 0} <span className="text-sm text-indigo-400">分</span>
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="space-y-4">
+                                        {reports[currentItem.id].formatting_feedback && (
+                                            <div className="bg-white rounded-xl p-4 border border-indigo-50 shadow-sm">
+                                                <h5 className="text-xs font-black text-slate-500 uppercase mb-2">卷面与规范</h5>
+                                                <p className="text-sm text-slate-700 leading-relaxed">{reports[currentItem.id].formatting_feedback}</p>
+                                            </div>
+                                        )}
+                                        
+                                        {reports[currentItem.id].ai_evaluation?.logic_gaps && reports[currentItem.id].ai_evaluation.logic_gaps.length > 0 && (
+                                            <div className="bg-white rounded-xl p-4 border border-rose-50 shadow-sm">
+                                                <h5 className="text-xs font-black text-rose-500 uppercase mb-2">逻辑漏洞</h5>
+                                                <ul className="list-disc pl-5 text-sm text-rose-700 leading-relaxed space-y-1">
+                                                    {reports[currentItem.id].ai_evaluation.logic_gaps.map((gap: string, i: number) => (
+                                                        <li key={i}>{gap}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        )}
+                                        
+                                        {reports[currentItem.id].ai_evaluation?.calculation_errors && reports[currentItem.id].ai_evaluation.calculation_errors.length > 0 && (
+                                            <div className="bg-white rounded-xl p-4 border border-amber-50 shadow-sm">
+                                                <h5 className="text-xs font-black text-amber-500 uppercase mb-2">计算错误</h5>
+                                                <ul className="list-disc pl-5 text-sm text-amber-700 leading-relaxed space-y-1">
+                                                    {reports[currentItem.id].ai_evaluation.calculation_errors.map((err: string, i: number) => (
+                                                        <li key={i}>{err}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        )}
+                                    </div>
+                                </motion.div>
+                            )}
+                        </div>
 
                         {/* Analysis & Solution Toggle */}
                         <div className="flex justify-center mb-8">

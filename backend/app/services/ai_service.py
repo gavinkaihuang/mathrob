@@ -470,10 +470,10 @@ class AIService:
         - Standard Solution (Reference): {standard_solution}
         
         # Grading Instructions (STRICT)
-        在输出 JSON 格式的反馈时，除了检查数学逻辑和计算结果外，**必须额外增加对卷面和答题规范的点评**。
-        请重点评估以下维度，以适应严格的标准化考试要求：
-        1. **卷面整洁度**：字迹是否清晰、是否有严重涂抹破坏阅读。
-        2. **答题规范性**：是否按规范写了“解/证明”、数学符号书写是否标准、推导步骤是否跳跃或缺失。
+        在输出 JSON 格式的反馈时，除了检查数学逻辑和计算结果外，必须包含：
+        1. 数学逻辑与计算结果分析。
+        2. 卷面与规范诊断（`formatting_feedback`）：指出步骤缺失或卷面涂改等扣分风险。
+        3. **知识点诊断（`knowledge_analysis`）**：列出该题涉及的核心知识点标签，并根据学生的作答情况，为每个知识点打出一个客观掌握分（1-10分）。
 
         # Output Format
         Return strictly valid JSON with the following fields:
@@ -482,13 +482,15 @@ class AIService:
         - calculation_errors: list of strings (Arithmetic or algebraic errors)
         - formatting_feedback: string (Assessment of handwriting, neatness, and formal presentation)
         - suggestions: markdown string (General advice for improvement)
+        - knowledge_analysis: array of objects [{{"tag": string, "score": int, "reason": string}}]
 
         {{
             "score": int,
             "logic_gaps": ["gap1", "gap2"],
             "calculation_errors": ["error1"],
             "formatting_feedback": "对卷面整洁度和规范性的详细点评",
-            "suggestions": "Markdown string with feedback"
+            "suggestions": "Markdown string with feedback",
+            "knowledge_analysis": [{{"tag": "对数运算", "score": 4, "reason": "底数变换公式运用错误"}}]
         }}
         """
         
