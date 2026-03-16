@@ -48,7 +48,7 @@ export default function KnowledgeMasteryDashboard({ data }: KnowledgeMasteryDash
   const startAssessment = async () => {
     setLoading(true);
     try {
-      const res = await fetchWithAuth('/api/assessment/generate_test', {
+      const res = await fetchWithAuth('/api/assessment/generate_paper', {
         method: 'POST'
       });
       if (res.ok) {

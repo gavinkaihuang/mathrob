@@ -162,9 +162,14 @@ class AssessmentSession(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    status = Column(String(50), default="in_progress") # in_progress, completed
+    status = Column(String(50), default="in_progress") # in_progress, paper_generated, completed
     overall_score = Column(Float, nullable=True) # Computed at the end
     report_markdown = Column(Text, nullable=True) # AI generated report
+    # Paper exam fields
+    paper_snapshot = Column(JSON, nullable=True)  # Full paper questions + answers JSON
+    paper_image_paths = Column(JSON, nullable=True)  # List of uploaded answer sheet photo paths
+    graded_problems = Column(JSON, nullable=True)  # Per-question grading results from full paper
+    formatting_feedback = Column(Text, nullable=True)  # Holistic handwriting/format feedback
     created_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
 

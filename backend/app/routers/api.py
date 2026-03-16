@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from ..database import get_db
 from ..models import Problem, KnowledgePoint, KnowledgeNode, LearningRecord, SolutionAttempt, User, PracticeProblem, PracticeSession, UserProgress, APICallLog, SystemLog, DailyReview
 import os
+import json
 from datetime import datetime
 from ..services.ai_service import AIService, AIServiceException
 from ..auth_deps import get_current_user
@@ -1330,7 +1331,214 @@ async def generate_daily_practice(
 
 # --- Diagnostic Assessment ---
 
+@router.post("/assessment/generate_paper")
+async def generate_paper(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Generate a printable diagnostic exam paper (5-10 questions) using AI.
+    Questions are selected from the user's learned topics via UserProgress.
+    The paper_snapshot (questions + answers) is stored in AssessmentSession.
+    """
+    from ..models import UserProgress, AssessmentSession, AssessmentProblem
+    from sqlalchemy import text as sql_text
+    import random
+
+    # 1. Get leaf-level learned topics (same algo as generate_test)
+    learned_progress = db.query(UserProgress).filter(
+        UserProgress.user_id == current_user.id,
+        UserProgress.is_learned == True
+    ).all()
+
+    # Build path -> name map from knowledge_nodes
+    try:
+        rows = db.execute(sql_text("SELECT name, path::text FROM knowledge_nodes")).fetchall()
+        path_to_name = {row[1]: row[0] for row in rows}
+    except Exception:
+        path_to_name = {}
+
+    all_paths = [p.knowledge_path for p in learned_progress]
+    leaf_entries = []
+    for p in learned_progress:
+        is_parent = any(other.startswith(p.knowledge_path + '.') for other in all_paths if other != p.knowledge_path)
+        if not is_parent:
+            name = path_to_name.get(p.knowledge_path, p.knowledge_path)
+            leaf_entries.append((p.knowledge_path, name))
+
+    if not leaf_entries:
+        raise HTTPException(status_code=400, detail="未找到已学知识点。请先在学习进度界面勾选您已学习的知识点。")
+
+    # Pick up to 8 topics for the paper
+    if len(leaf_entries) > 8:
+        leaf_entries = random.sample(leaf_entries, 8)
+
+    topic_names = [name for _, name in leaf_entries]
+
+    # 2. Ask Gemini to generate the full paper
+    from ..main import ai_service
+    topics_str = "、".join(topic_names)
+    prompt = f"""请为一位高中数学学生生成一套完整的摸底测试试卷，覆盖以下知识点：{topics_str}。
+
+要求：
+- 共生成 {min(len(topic_names), 8)} 道题（每个知识点各1道），难度适中（3-4颗星）
+- 包含解答题（非选择题），需要学生写出完整解题过程
+- 每道题必须有明确的标准答案和解析
+
+请严格以如下 JSON 数组格式输出（不要使用markdown代码块包装）：
+[
+  {{
+    "num": 1,
+    "knowledge_tag": "知识点名称",
+    "latex_content": "题目的完整LaTeX内容（含$符号）",
+    "answer": "标准答案",
+    "explanation": "详细解析步骤",
+    "score": 10
+  }},
+  ...
+]"""
+
+    try:
+        text, used_model, _ = await ai_service.call_gemini_with_fallback('teaching', prompt)
+        text = text.strip()
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        paper_questions = json.loads(text.strip())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI 生成试卷失败: {str(e)}")
+
+    # 3. Create session with snapshot
+    session = AssessmentSession(
+        user_id=current_user.id,
+        status="paper_generated",
+        paper_snapshot=paper_questions
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+
+    return {
+        "status": "success",
+        "session_id": session.id,
+        "paper": paper_questions,
+        "topics": topic_names
+    }
+
+
+@router.post("/assessment/{session_id}/submit_full_paper")
+async def submit_full_paper(
+    session_id: int,
+    files: List[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Accept multiple answer-sheet photos for an assessment session.
+    Sends all images + original questions to Gemini for holistic grading.
+    Updates AssessmentSession with grading results and report.
+    """
+    from ..models import AssessmentSession, UserKnowledgeMastery
+    from datetime import datetime as dt
+
+    session = db.query(AssessmentSession).filter(
+        AssessmentSession.id == session_id,
+        AssessmentSession.user_id == current_user.id
+    ).first()
+
+    if not session:
+        raise HTTPException(status_code=404, detail="找不到该评测会话")
+    if not session.paper_snapshot:
+        raise HTTPException(status_code=400, detail="该会话没有试卷快照，请先调用 generate_paper")
+
+    # 1. Save uploaded images
+    upload_dir = f"uploads/assessments/{session_id}"
+    os.makedirs(upload_dir, exist_ok=True)
+
+    image_paths = []
+    for i, file in enumerate(files):
+        if not file.content_type.startswith("image/"):
+            continue
+        suffix = os.path.splitext(file.filename)[1] or ".jpg"
+        save_path = os.path.join(upload_dir, f"answer_{i+1}{suffix}")
+        with open(save_path, "wb") as f:
+            f.write(await file.read())
+        image_paths.append(save_path)
+
+    if not image_paths:
+        raise HTTPException(status_code=400, detail="请至少上传一张答卷图片")
+
+    # 2. Call AI to grade
+    from ..main import ai_service
+    try:
+        grading_result = await ai_service.grade_full_paper(
+            paper_snapshot=session.paper_snapshot,
+            image_paths=image_paths,
+            session_id=session_id
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI 批改失败: {str(e)}")
+
+    # 3. Compute overall score
+    graded = grading_result.get("graded_problems", [])
+    total = sum(p.get("score", 0) for p in graded)
+    max_total = sum(p.get("max_score", 10) for p in graded)
+    overall_pct = round((total / max_total * 100) if max_total > 0 else 0, 1)
+
+    # 4. Persist grading results
+    session.graded_problems = graded
+    session.report_markdown = grading_result.get("comprehensive_report", "")
+    session.formatting_feedback = grading_result.get("formatting_feedback", "")
+    session.paper_image_paths = image_paths
+    session.overall_score = overall_pct
+    session.status = "completed"
+    session.completed_at = dt.utcnow()
+
+    # 5. Update UserKnowledgeMastery for each graded topic
+    for gp in graded:
+        tag = gp.get("knowledge_tag", "")
+        score = gp.get("score", 0)
+        max_score = gp.get("max_score", 10)
+        if not tag:
+            continue
+        ai_rating = round((score / max_score) * 10, 1) if max_score > 0 else 5.0
+
+        mastery = db.query(UserKnowledgeMastery).filter(
+            UserKnowledgeMastery.user_id == current_user.id,
+            UserKnowledgeMastery.knowledge_tag == tag
+        ).first()
+
+        if mastery:
+            # Blend new rating with existing (weighted average)
+            mastery.ai_assessed_rating = round((mastery.ai_assessed_rating or 5.0) * 0.4 + ai_rating * 0.6, 1)
+            self_r = mastery.user_self_rating or 5.0
+            mastery.comprehensive_score = round(mastery.ai_assessed_rating * 0.6 + self_r * 0.4, 1)
+        else:
+            new_mastery = UserKnowledgeMastery(
+                user_id=current_user.id,
+                knowledge_tag=tag,
+                ai_assessed_rating=ai_rating,
+                comprehensive_score=ai_rating
+            )
+            db.add(new_mastery)
+
+    db.commit()
+
+    return {
+        "status": "success",
+        "session_id": session_id,
+        "overall_score": overall_pct,
+        "graded_problems": graded,
+        "comprehensive_report": session.report_markdown,
+        "formatting_feedback": session.formatting_feedback
+    }
+
+
 @router.post("/assessment/generate_test")
+
 async def generate_diagnostic_test(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -1526,6 +1734,9 @@ async def get_assessment_session(
         "status": session.status,
         "overall_score": session.overall_score,
         "report_markdown": session.report_markdown,
+        "formatting_feedback": session.formatting_feedback,
+        "paper_snapshot": session.paper_snapshot,
+        "graded_problems": session.graded_problems,
         "problems": items
     }
 

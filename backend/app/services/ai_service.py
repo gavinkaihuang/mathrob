@@ -649,3 +649,78 @@ class AIService:
             print(f"Error generating diagnostic report: {e}")
             self._log_system_error("teaching", f"generate_diagnostic_report Failed: {str(e)}", {"traceback": traceback.format_exc()})
             return f"生成诊断报告失败: {str(e)}"
+
+    async def grade_full_paper(self, paper_snapshot: List[Dict[str, Any]], image_paths: List[str], session_id: int = None) -> Dict[str, Any]:
+        """
+        [NEW] Grades a full exam paper by sending all answer images + original questions to Gemini vision.
+        Returns { graded_problems, comprehensive_report, formatting_feedback }
+        """
+        # Build question summary for the prompt
+        questions_json = json.dumps(paper_snapshot, ensure_ascii=False, indent=2)
+        
+        system_prompt = f"""你是一位资深数学阅卷专家。本次任务是整卷批改与全局学情诊断。
+我将提供这份试卷的【原题与标准答案】，以及学生上传的【多张手写答卷照片】。照片可能包含多道题的解答，请自行定位对应关系。
+
+请完成以下任务：
+1. **逐题批改**：识别学生在每道题上的作答过程。判断正误、指出具体错因，并给出该题得分（满分10分）。
+2. **全局学情报告**：基于整体作答情况，生成阶段性学习诊断报告（Markdown 格式），明确指出优势与薄弱知识点，并给出后续复习建议。严禁对试卷外或未学过的知识点进行评价。
+3. **卷面评估**：对整体卷面整洁度和答题规范性进行评价。
+
+【原题与标准答案 JSON】:
+{questions_json}
+
+请严格按照以下 JSON 格式输出结果，不要包含任何额外的 Markdown 代码块标记：
+{{
+  "graded_problems": [
+    {{
+      "problem_id": "对应原题的序号（从1开始）",
+      "score": 8,
+      "max_score": 10,
+      "feedback": "步骤分析与扣分原因",
+      "knowledge_tag": "核心知识点",
+      "is_correct": true
+    }}
+  ],
+  "comprehensive_report": "全局诊断报告文本（Markdown格式）...",
+  "formatting_feedback": "卷面整洁度与答题规范评价..."
+}}"""
+
+        try:
+            # Load images
+            pil_images = []
+            for img_path in image_paths:
+                try:
+                    if not os.path.isabs(img_path):
+                        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                        img_path = os.path.join(base, img_path)
+                    pil_images.append(PIL.Image.open(img_path))
+                except Exception as e:
+                    print(f"Warning: Could not load image {img_path}: {e}")
+            
+            # Build content: prompt + all images
+            content_parts = [system_prompt] + pil_images
+            
+            # Use vision model for multi-modal
+            text, used_model, used_token = await self.call_gemini_with_fallback('vision', content_parts)
+            
+            # Clean JSON
+            text = text.strip()
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            
+            result = json.loads(text.strip())
+            
+            self._log_api_call("VISION", "GRADE_FULL_PAPER", used_model, used_token, target_id=session_id)
+            return result
+            
+        except json.JSONDecodeError as e:
+            self._log_system_error("vision", f"grade_full_paper JSON parse failed: {str(e)}", {"raw": text[:500] if 'text' in dir() else "N/A"})
+            raise ValueError(f"AI returned invalid JSON: {str(e)}")
+        except Exception as e:
+            self._log_system_error("vision", f"grade_full_paper Failed: {str(e)}", {"traceback": traceback.format_exc()})
+            raise
+

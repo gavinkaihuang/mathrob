@@ -1,119 +1,183 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { fetchWithAuth } from '@/utils/api';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { LatexRenderer } from '@/components/LatexRenderer';
-import { Loader2, ArrowLeft, CheckCircle2 } from 'lucide-react';
-import KnowledgeMasteryDashboard from '@/components/KnowledgeMasteryDashboard';
+import { Loader2, ArrowLeft, CheckCircle2, XCircle, MinusCircle, PenLine, Star } from 'lucide-react';
+import { RadarChart, Radar, PolarGrid, PolarAngleAxis, ResponsiveContainer, Tooltip } from 'recharts';
+import 'katex/dist/katex.min.css';
+
+interface GradedProblem {
+  problem_id: string | number;
+  score: number;
+  max_score: number;
+  feedback: string;
+  knowledge_tag: string;
+  is_correct: boolean;
+}
+
+interface ReportData {
+  overall_score: number;
+  report_markdown: string;
+  formatting_feedback: string;
+  graded_problems: GradedProblem[];
+  status: string;
+}
 
 export default function AssessmentReportPage() {
-    const router = useRouter();
-    const params = useParams();
-    const sessionId = params?.session_id as string;
-    
-    const [report, setReport] = useState<string | null>(null);
-    const [score, setScore] = useState<number>(0);
-    const [loading, setLoading] = useState(true);
+  const router = useRouter();
+  const params = useParams();
+  const sessionId = params?.session_id as string;
 
-    useEffect(() => {
-        if (sessionId) {
-            loadReport(sessionId);
+  const [data, setData] = useState<ReportData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!sessionId) return;
+    fetchWithAuth(`/api/assessment/${sessionId}`)
+      .then(async res => {
+        if (res.ok) {
+          const json = await res.json();
+          setData(json);
+        } else {
+          setError(`无法加载报告 [${res.status}]`);
         }
-    }, [sessionId]);
+      })
+      .catch(() => setError('网络错误'))
+      .finally(() => setLoading(false));
+  }, [sessionId]);
 
-    const loadReport = async (sid: string) => {
-        // Technically this should be GET /api/assessment/{id}/report
-        // Since we didn't specify building a GET endpoint in the prompt request,
-        // we will simulate fetching it. In a real scenario, this data would either
-        // be passed down or fetched from a dedicated endpoint.
-        
-        // Simulating the API returning the finalized markdown.
-        setTimeout(() => {
-            setReport(`
-# 🌟 总体评价 (Overall Assessment)
-太棒了！你已经完成了本次数学摸底测验。从结果来看，你在**集合的概念与运算**等基础模块展现出了扎实的功底。但随着难度梯度的上升，在综合应用题上暴露了一些短板，没关系，这正是我们接下来努力的方向。
+  if (loading) return (
+    <div className="min-h-screen bg-white flex items-center justify-center">
+      <div className="text-center space-y-3">
+        <Loader2 className="w-10 h-10 text-indigo-500 animate-spin mx-auto" />
+        <p className="text-gray-700 font-medium">加载诊断报告中…</p>
+      </div>
+    </div>
+  );
 
-# 📊 核心表现诊断 (Performance Breakdown)
-- **集合与逻辑**: 表现优异，概念清晰。
-- **函数性质**: 对于奇偶性与单调性的结合应用，逻辑推导存在断层。
-- **立体几何**: 空间想象力不错，但在求二面角时的**计算错误**频发，需多加检查。
+  if (error || !data) return (
+    <div className="min-h-screen bg-white flex items-center justify-center p-6">
+      <div className="border border-red-200 rounded-2xl p-8 max-w-md text-center space-y-4 bg-red-50">
+        <XCircle className="w-10 h-10 text-red-400 mx-auto" />
+        <p className="text-red-600">{error || '数据异常'}</p>
+        <button onClick={() => router.back()} className="px-6 py-2 border border-gray-200 rounded-xl text-gray-600 hover:bg-gray-50 text-sm">返回</button>
+      </div>
+    </div>
+  );
 
-# ⚠️ 重灾区预警 (Priority Weaknesses)
-根据 AI 阅卷引擎深度比对发现，你有以下几个高频失分点：
-1. **二次函数的极值探讨**：分类讨论不完整，丢失了一类解。
-2. **三角恒等变换公式**：降幂公式记忆不牢固。
+  const graded = data.graded_problems || [];
+  const totalScore = graded.reduce((s, p) => s + (p.score || 0), 0);
+  const maxScore = graded.reduce((s, p) => s + (p.max_score || 10), 0);
+  const pct = maxScore > 0 ? Math.round(totalScore / maxScore * 100) : 0;
 
-# 📝 卷面与考学习惯 (Presentation & Habits)
-**卷面规范度：良好**。
-解题步骤清晰，LaTeX 连词和因果关系词（如“因为...所以...”）书写规范。但请注意等号对齐。
+  // Radar data
+  const radarData = graded.map(p => ({
+    subject: p.knowledge_tag || `第${p.problem_id}题`,
+    score: p.max_score > 0 ? Math.round(p.score / p.max_score * 100) : 0,
+    fullMark: 100,
+  }));
 
-# 🚀 下一步突击计划 (Actionable Next Steps)
-针对你今天的表现，明天的「今日复习」模块已经被我们安排得满满的！系统将为你优先推送**函数性质**和**三角恒等变换**的变式训练题，让我们一起逐个击破！
-            `);
-            setScore(85);
-            setLoading(false);
-        }, 1000);
-    };
+  const scoreColor = pct >= 80 ? 'text-green-400' : pct >= 60 ? 'text-yellow-400' : 'text-red-400';
 
-    if (loading) {
-        return (
-            <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50">
-                 <Loader2 className="w-12 h-12 animate-spin text-indigo-600 mb-6" />
-                 <h2 className="text-xl font-black text-slate-800 tracking-wider">正在生成学情诊断报告...</h2>
-                 <p className="text-sm text-slate-500 mt-2">AI 教研专家正在查阅你的答卷</p>
-            </div>
-        );
-    }
-
-    return (
-        <div className="min-h-screen bg-slate-50 py-12 px-4 sm:px-6 lg:px-8">
-            <div className="max-w-4xl mx-auto space-y-8">
-                
-                {/* Header Actions */}
-                <div className="flex items-center justify-between">
-                    <button 
-                        onClick={() => router.push('/')}
-                        className="flex items-center gap-2 text-slate-500 hover:text-indigo-600 transition-colors font-bold"
-                    >
-                        <ArrowLeft className="w-5 h-5" /> 返回控制台
-                    </button>
-                    <div className="px-4 py-1.5 bg-emerald-100 text-emerald-700 rounded-full text-sm font-black flex items-center gap-2">
-                        <CheckCircle2 className="w-4 h-4" /> 测验已归档
-                    </div>
-                </div>
-
-                {/* Score Card */}
-                <div className="bg-white rounded-[2rem] p-10 shadow-sm border border-slate-200 text-center relative overflow-hidden">
-                    <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-indigo-500 via-purple-500 to-emerald-500"></div>
-                    <h1 className="text-3xl font-black text-slate-800 mb-6">本次综合得分</h1>
-                    <div className="inline-flex items-baseline justify-center px-12 py-6 bg-slate-50 rounded-3xl border-2 border-slate-100 shadow-inner mb-4">
-                        <span className="text-7xl font-black text-indigo-600">{score}</span>
-                        <span className="text-2xl font-bold text-slate-400 ml-2">/ 100</span>
-                    </div>
-                    <p className="text-slate-500 font-medium">综合表现评估已同步更新至您的知识图谱底表。</p>
-                </div>
-
-                {/* Dashboard Pre-view */}
-                <div className="mb-8">
-                    <KnowledgeMasteryDashboard />
-                </div>
-
-                {/* Report Content */}
-                <div className="bg-white rounded-[2rem] p-8 md:p-12 shadow-sm border border-slate-200 prose prose-slate max-w-none prose-headings:font-black prose-h1:text-2xl prose-h1:text-indigo-900 prose-h1:pb-4 prose-h1:border-b prose-h1:border-slate-100 prose-li:marker:text-indigo-500">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {report || ''}
-                    </ReactMarkdown>
-                </div>
-
-            </div>
-            
-            <style jsx global>{`
-                .prose p { margin-bottom: 1.5em; line-height: 1.8; color: #475569; }
-                .prose strong { color: #1e293b; }
-            `}</style>
+  return (
+    <div className="min-h-screen bg-white">
+      {/* Header */}
+      <div className="sticky top-0 z-10 bg-white border-b border-gray-200 px-6 py-4">
+        <div className="max-w-4xl mx-auto flex items-center justify-between">
+          <button onClick={() => router.push('/')} className="flex items-center gap-1.5 text-gray-500 hover:text-gray-800 transition text-sm">
+            <ArrowLeft className="w-4 h-4" /> 返回主页
+          </button>
+          <h1 className="text-gray-900 font-bold text-base">AI 批改报告</h1>
+          <div />
         </div>
-    );
+      </div>
+
+      <div className="max-w-4xl mx-auto p-6 space-y-8">
+        {/* Score Banner */}
+        <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-8 text-center">
+          <p className="text-indigo-500 text-sm mb-2">本次摸底评测总分</p>
+          <p className={`text-7xl font-black mb-2 ${scoreColor}`}>{pct}<span className="text-3xl">分</span></p>
+          <p className="text-gray-500 text-sm">{totalScore} / {maxScore} 分 · {graded.length} 道题</p>
+        </div>
+
+        {/* Radar + Formatting feedback */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {radarData.length > 2 && (
+            <div className="border border-gray-200 rounded-2xl p-6 bg-white">
+              <h3 className="text-gray-900 font-bold mb-4 text-sm">知识点能力雷达图</h3>
+              <ResponsiveContainer width="100%" height={240}>
+                <RadarChart data={radarData}>
+                  <PolarGrid stroke="rgba(0,0,0,0.08)" />
+                  <PolarAngleAxis dataKey="subject" tick={{ fill: '#6366f1', fontSize: 11 }} />
+                  <Radar dataKey="score" stroke="#6366f1" fill="#6366f1" fillOpacity={0.25} />
+                  <Tooltip contentStyle={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px', color: '#111' }} />
+                </RadarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+          {data.formatting_feedback && (
+            <div className="border border-gray-200 rounded-2xl p-6 bg-white">
+              <div className="flex items-center gap-2 mb-3">
+                <PenLine className="w-4 h-4 text-indigo-500" />
+                <h3 className="text-gray-900 font-bold text-sm">卷面评价</h3>
+              </div>
+              <p className="text-gray-600 text-sm leading-relaxed">{data.formatting_feedback}</p>
+            </div>
+          )}
+        </div>
+
+        {/* Per-question breakdown */}
+        <div className="border border-gray-200 rounded-2xl overflow-hidden bg-white">
+          <div className="px-6 py-4 border-b border-gray-100 bg-gray-50">
+            <h2 className="text-gray-900 font-bold text-base">逐题批改详情</h2>
+          </div>
+          <div className="divide-y divide-gray-100">
+            {graded.map((p, i) => {
+              const pctScore = p.max_score > 0 ? Math.round(p.score / p.max_score * 100) : 0;
+              return (
+                <div key={i} className="px-6 py-5 flex gap-4">
+                  <div className="flex-shrink-0 mt-0.5">
+                    {p.is_correct
+                      ? <CheckCircle2 className="w-6 h-6 text-green-500" />
+                      : p.score > 0
+                        ? <MinusCircle className="w-6 h-6 text-yellow-500" />
+                        : <XCircle className="w-6 h-6 text-red-400" />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      <span className="text-gray-900 font-semibold text-sm">第 {p.problem_id} 题</span>
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">{p.knowledge_tag}</span>
+                      <span className={`text-xs font-bold ${pctScore >= 80 ? 'text-green-600' : pctScore >= 60 ? 'text-yellow-600' : 'text-red-500'}`}>
+                        {p.score}/{p.max_score} 分
+                      </span>
+                    </div>
+                    <p className="text-gray-600 text-sm leading-relaxed">{p.feedback}</p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Comprehensive Report */}
+        {data.report_markdown && (
+          <div className="border border-gray-200 rounded-2xl p-6 bg-white">
+            <div className="flex items-center gap-2 mb-4">
+              <Star className="w-5 h-5 text-yellow-500" />
+              <h2 className="text-gray-900 font-bold text-base">全局学情诊断报告</h2>
+            </div>
+            <div className="prose prose-sm max-w-none text-gray-700">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {data.report_markdown}
+              </ReactMarkdown>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
