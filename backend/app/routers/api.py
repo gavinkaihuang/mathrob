@@ -1331,6 +1331,26 @@ async def generate_daily_practice(
 
 # --- Diagnostic Assessment ---
 
+@router.get("/user/assessment_status")
+def get_assessment_status(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from ..models import AssessmentSession
+    from datetime import datetime
+    
+    # Get the most recent completed assessment
+    last_session = db.query(AssessmentSession).filter(
+        AssessmentSession.user_id == current_user.id,
+        AssessmentSession.status == "completed"
+    ).order_by(AssessmentSession.id.desc()).first()
+
+    if not last_session:
+        return {"days_since_last_test": None}
+    
+    # Use completed_at if available, otherwise created_at
+    ref_date = last_session.completed_at or last_session.created_at
+    days = (datetime.utcnow() - ref_date).days
+    
+    return {"days_since_last_test": days}
+
 @router.post("/assessment/generate_paper")
 async def generate_paper(
     db: Session = Depends(get_db),
@@ -1344,6 +1364,25 @@ async def generate_paper(
     from ..models import UserProgress, AssessmentSession, AssessmentProblem
     from sqlalchemy import text as sql_text
     import random
+
+    # 0. Check for existing uncompleted assessment paper session
+    existing_session = db.query(AssessmentSession).filter(
+        AssessmentSession.user_id == current_user.id,
+        AssessmentSession.status == "paper_generated"
+    ).order_by(AssessmentSession.id.desc()).first()
+
+    if existing_session and existing_session.paper_snapshot:
+        try:
+            topic_names = list(set([q.get('knowledge_tag', '未知') for q in existing_session.paper_snapshot]))
+        except:
+            topic_names = []
+            
+        return {
+            "status": "success",
+            "session_id": existing_session.id,
+            "paper": existing_session.paper_snapshot,
+            "topics": topic_names
+        }
 
     # 1. Get leaf-level learned topics (same algo as generate_test)
     learned_progress = db.query(UserProgress).filter(
@@ -1373,17 +1412,49 @@ async def generate_paper(
     if len(leaf_entries) > 8:
         leaf_entries = random.sample(leaf_entries, 8)
 
-    topic_names = [name for _, name in leaf_entries]
+    # 2. Get Mastery Scores and Build Difficulty Matrix
+    from ..models import UserKnowledgeMastery
+    difficulty_matrix = []
+    topic_names = []
+    
+    for path, name in leaf_entries:
+        topic_names.append(name)
+        # Assuming knowledge_tag in UserKnowledgeMastery is the topic name
+        mastery = db.query(UserKnowledgeMastery).filter(
+            UserKnowledgeMastery.user_id == current_user.id,
+            UserKnowledgeMastery.knowledge_tag == name
+        ).first()
+        
+        score = mastery.comprehensive_score if mastery and mastery.comprehensive_score else 0
+        
+        if score < 60:
+            difficulty = "基础概念与简单计算 (Basic)"
+        elif score <= 85:
+            difficulty = "中等难度与标准题型 (Medium)"
+        else:
+            difficulty = "综合应用与压轴拔高 (Hard)"
+            
+        difficulty_matrix.append({
+            "topic": name,
+            "mastery_score": score,
+            "target_difficulty": difficulty
+        })
 
-    # 2. Ask Gemini to generate the full paper
+    difficulty_matrix_json = json.dumps(difficulty_matrix, ensure_ascii=False, indent=2)
+
+    # 3. Ask Gemini to generate the full paper
     from ..main import ai_service
-    topics_str = "、".join(topic_names)
-    prompt = f"""请为一位高中数学学生生成一套完整的摸底测试试卷，覆盖以下知识点：{topics_str}。
+    
+    prompt = f"""你是一个资深的数学教研专家。请根据以下【知识点及对应难度要求矩阵】，为学生生成一套定制化的摸底试卷：
+{difficulty_matrix_json}
 
-要求：
-- 共生成 {min(len(topic_names), 8)} 道题（每个知识点各1道），难度适中（3-4颗星）
-- 包含解答题（非选择题），需要学生写出完整解题过程
-- 每道题必须有明确的标准答案和解析
+**出题规则**：
+1. 必须为矩阵中的每个知识点各生成1道题（共 {len(topic_names)} 道）。
+2. 对于要求【基础】的知识点，题目必须侧重单一公式或定义的直接套用，用于检测基础盲区。
+3. 对于要求【中等】的知识点，题目需符合常见高考/模拟考的中档标准题型。
+4. 对于要求【拔高】的知识点，题目需涉及知识交汇或复杂变形，以测试其真实上限。
+5. 包含解答题（非选择题），需要学生写出完整解题过程。
+6. 每道题必须有明确的标准答案和解析。
 
 请严格以如下 JSON 数组格式输出（不要使用markdown代码块包装）：
 [
