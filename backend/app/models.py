@@ -254,3 +254,29 @@ class APICallLog(Base):
     model_used = Column(String(100), nullable=False)
     token_name = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class ExamRecord(Base):
+    __tablename__ = "exam_records"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    status = Column(String(50), default="processing") # processing, completed, failed
+    total_score = Column(Float, nullable=True)
+    overall_evaluation = Column(Text, nullable=True)
+    image_paths = Column(JSON, nullable=True) # Paths to uploaded images
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    user = relationship("User", backref="exam_records")
+    results = relationship("ExamProblemResult", back_populates="exam", cascade="all, delete-orphan")
+
+class ExamProblemResult(Base):
+    __tablename__ = "exam_problem_results"
+    id = Column(Integer, primary_key=True, index=True)
+    exam_id = Column(Integer, ForeignKey("exam_records.id"), nullable=False, index=True)
+    problem_number = Column(String(50), nullable=False)
+    score = Column(Float, nullable=False)
+    max_score = Column(Float, nullable=False)
+    knowledge_tag = Column(String(100), nullable=False, index=True)
+    feedback = Column(Text, nullable=True)
+    
+    exam = relationship("ExamRecord", back_populates="results")

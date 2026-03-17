@@ -1,6 +1,7 @@
 import { FileUpload } from '@/components/FileUpload';
 import KnowledgeMasteryDashboard from '@/components/KnowledgeMasteryDashboard';
 import DiagnosticTestButton from '@/components/DiagnosticTestButton';
+import FullExamUploader from '@/components/FullExamUploader';
 import Link from 'next/link';
 
 export default function Home() {
@@ -28,9 +29,12 @@ export default function Home() {
           <div className="lg:col-span-4 flex flex-col gap-6">
             {/* Quick Upload Action */}
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 w-full flex flex-col">
-              <h2 className="text-xl font-bold text-slate-800 mb-4 text-center">新题目解析</h2>
+              <h2 className="text-xl font-bold text-slate-800 mb-4 text-center">新题理解解答</h2>
               <FileUpload />
             </div>
+
+            {/* Full Exam Upload Action */}
+            <FullExamUploader />
 
             {/* Diagnostic Assessment Button */}
             <DiagnosticTestButton />

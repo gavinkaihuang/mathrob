@@ -777,6 +777,204 @@ async def submit_homework(
 
 
 
+# --- Full Paper Grading ---
+from fastapi import BackgroundTasks
+
+class ExamSessionSchema(BaseModel):
+    id: int
+    status: str
+    total_score: Optional[float] = None
+    overall_evaluation: Optional[str] = None
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+async def process_full_exam(task_id: int, user_id: int, image_paths: List[str]):
+    # Note: We must create a new DB session inside the background task
+    from ..database import SessionLocal
+    from ..models import ExamRecord, ExamProblemResult, KnowledgeNode, UserKnowledgeMastery
+    from ..main import ai_service
+    
+    db = SessionLocal()
+    try:
+        # Get standard knowledge tags for strict prompt constraints
+        nodes = db.query(KnowledgeNode).all()
+        standard_tags_list = [n.name for n in nodes]
+        
+        # Build strict system prompt
+        prompt = f"""你是一位资深高中数学阅卷专家。用户上传了多张图片，其中包含了【试卷原题】和【学生的手写答题纸】。
+请严格执行以下任务：
+1. **题答匹配**：仔细识别试卷上的题号，并与答题纸上的题号和作答过程进行匹配。
+2. **逐题批改**：对每一题的数学逻辑进行研判，给出得分（百分制）和错因分析。
+3. **知识点强约束提取**：判断该题考察的核心知识点。**你必须且只能从以下列表中选择知识点标签：{standard_tags_list}。如果都不匹配，请选择最接近的一个，绝对禁止自行创造新标签。**
+
+请严格输出以下 JSON 格式：
+{{
+  "total_score": 85,
+  "overall_evaluation": "整体卷面与学习状态评估...",
+  "problems": [
+    {{
+      "problem_number": "1",
+      "score": 10,
+      "max_score": 10,
+      "knowledge_tag": "对数运算", 
+      "feedback": "步骤完全正确。"
+    }}
+  ]
+}}"""
+
+        try:
+            # We use 'teaching' model as it handles multi-modal well
+            text, used_model, _ = await ai_service.call_gemini_with_fallback('teaching', prompt, image_paths=image_paths)
+            
+            text = text.strip()
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            result_json = json.loads(text.strip())
+            
+            # Save results 
+            exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
+            if not exam:
+                return # Task deleted/invalid
+                
+            exam.total_score = result_json.get("total_score", 0)
+            exam.overall_evaluation = result_json.get("overall_evaluation", "")
+            exam.status = "completed"
+            exam.completed_at = datetime.utcnow()
+            
+            # Sync Knowledge & Save Problems
+            problems = result_json.get("problems", [])
+            for p in problems:
+                tag = p.get("knowledge_tag", "未知")
+                score = p.get("score", 0)
+                max_score = p.get("max_score", 10)
+                
+                # Save problem result
+                prob_res = ExamProblemResult(
+                    exam_id=exam.id,
+                    problem_number=str(p.get("problem_number", "未知")),
+                    score=score,
+                    max_score=max_score,
+                    knowledge_tag=tag,
+                    feedback=p.get("feedback", "")
+                )
+                db.add(prob_res)
+                
+                # Update User Knowledge Mastery
+                if max_score > 0 and tag in standard_tags_list:
+                    mastery_ratio = score / max_score
+                    ai_rating = round(mastery_ratio * 10, 1) # scale to 1-10
+                    
+                    mastery_record = db.query(UserKnowledgeMastery).filter(
+                        UserKnowledgeMastery.user_id == user_id,
+                        UserKnowledgeMastery.knowledge_tag == tag
+                    ).first()
+                    
+                    if mastery_record:
+                        # Blend old rating with new rating (weighted average prioritizing new)
+                        old_rating = mastery_record.ai_assessed_rating or 5.0
+                        mastery_record.ai_assessed_rating = round(old_rating * 0.4 + ai_rating * 0.6, 1)
+                        self_r = mastery_record.user_self_rating or 5.0
+                        mastery_record.comprehensive_score = round(mastery_record.ai_assessed_rating * 0.6 + self_r * 0.4, 1)
+                    else:
+                        new_mastery = UserKnowledgeMastery(
+                            user_id=user_id,
+                            knowledge_tag=tag,
+                            ai_assessed_rating=ai_rating,
+                            comprehensive_score=ai_rating
+                        )
+                        db.add(new_mastery)
+            
+            db.commit()
+            
+        except Exception as e:
+            print(f"Background Grading Failed: {e}")
+            exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
+            if exam:
+                exam.status = "failed"
+                exam.overall_evaluation = f"AI Error: {str(e)}"
+                db.commit()
+                
+    finally:
+        db.close()
+
+
+@router.post("/exams/upload_and_grade")
+async def upload_and_grade_exam(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    from ..models import ExamRecord
+    
+    saved_paths = []
+    # Save files
+    for file in files:
+        safe_filename = f"exam_{current_user.id}_{int(datetime.utcnow().timestamp())}_{file.filename}"
+        file_location = os.path.join(UPLOAD_DIR, safe_filename)
+        
+        with open(file_location, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+            
+        saved_paths.append(file_location)
+        
+    # Create Task Record
+    exam_record = ExamRecord(
+        user_id=current_user.id,
+        status="processing",
+        image_paths=saved_paths
+    )
+    db.add(exam_record)
+    db.commit()
+    db.refresh(exam_record)
+    
+    # Dispatch Async Task
+    background_tasks.add_task(process_full_exam, task_id=exam_record.id, user_id=current_user.id, image_paths=saved_paths)
+    
+    return {"task_id": exam_record.id, "status": exam_record.status}
+
+@router.get("/exams/task_status/{task_id}")
+def get_exam_status(task_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from ..models import ExamRecord, ExamProblemResult
+    
+    exam = db.query(ExamRecord).filter(
+        ExamRecord.id == task_id,
+        ExamRecord.user_id == current_user.id
+    ).first()
+    
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+        
+    response = {
+        "id": exam.id,
+        "status": exam.status,
+        "total_score": exam.total_score,
+        "overall_evaluation": exam.overall_evaluation,
+        "created_at": exam.created_at,
+        "results": []
+    }
+    
+    if exam.status == "completed":
+        results = db.query(ExamProblemResult).filter(ExamProblemResult.exam_id == exam.id).all()
+        response["results"] = [
+            {
+                "problem_number": r.problem_number,
+                "score": r.score,
+                "max_score": r.max_score,
+                "knowledge_tag": r.knowledge_tag,
+                "feedback": r.feedback
+            } for r in results
+        ]
+        
+    return response
+
 @router.delete("/solution-attempts/{attempt_id}")
 async def delete_solution_attempt(attempt_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     attempt = db.query(SolutionAttempt).filter(SolutionAttempt.id == attempt_id, SolutionAttempt.user_id == current_user.id).first()
