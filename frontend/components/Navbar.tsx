@@ -23,6 +23,7 @@ export function Navbar() {
     const mainLinks = [
         { href: '/', label: '首页', icon: <Home className="w-4 h-4" /> },
         { href: '/history', label: '错题本', icon: <History className="w-4 h-4" /> },
+        { href: '/exams/history', label: '试卷档案', icon: <BookOpen className="w-4 h-4" /> },
         { href: '/review', label: '今日复习', icon: <BookOpen className="w-4 h-4" /> },
         { href: '/review-history', label: '复习题库', icon: <Library className="w-4 h-4" /> },
         { href: '/reports', label: '周报', icon: <BarChart3 className="w-4 h-4" /> },

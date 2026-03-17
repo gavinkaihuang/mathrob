@@ -262,7 +262,13 @@ class ExamRecord(Base):
     status = Column(String(50), default="processing") # processing, completed, failed
     total_score = Column(Float, nullable=True)
     overall_evaluation = Column(Text, nullable=True)
+    # New fields for paper metadata and model used
+    paper_name = Column(String(255), nullable=True)
+    ai_model = Column(String(100), nullable=True)
+    overall_feedback = Column(Text, nullable=True)
     image_paths = Column(JSON, nullable=True) # Paths to uploaded images
+    # Persistent accessible URLs for uploaded images (served under /static/...)
+    image_urls = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
 
@@ -278,5 +284,8 @@ class ExamProblemResult(Base):
     max_score = Column(Float, nullable=False)
     knowledge_tag = Column(String(100), nullable=False, index=True)
     feedback = Column(Text, nullable=True)
+    # Extracted OCR original question and user answer texts for context
+    original_question_text = Column(Text, nullable=True)
+    user_answer_text = Column(Text, nullable=True)
     
     exam = relationship("ExamRecord", back_populates="results")

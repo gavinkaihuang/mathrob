@@ -67,7 +67,7 @@ class AIService:
         except Exception as e:
             print(f"Failed to write to api_call_logs: {e}")
 
-    async def call_gemini_with_fallback(self, category: str, prompt: str, image_path: str = None) -> tuple[str, str]:
+    async def call_gemini_with_fallback(self, category: str, prompt_or_content, image_path: str = None, image_paths: List[str] = None) -> tuple[str, str, str]:
         """
         Routes request to the appropriate model based on configuration in the DB.
         Categories: 'vision', 'teaching', 'utility'
@@ -99,11 +99,27 @@ class AIService:
                 model = genai.GenerativeModel(model_name)
                 
                 generation_config = {"response_mime_type": "application/json"}
-                
-                content = [prompt]
-                if image_path:
-                    img = PIL.Image.open(image_path)
-                    content.append(img)
+
+                # `prompt_or_content` may be a string prompt or a pre-built list of content parts (prompt + images)
+                if isinstance(prompt_or_content, list):
+                    content = prompt_or_content.copy()
+                else:
+                    content = [prompt_or_content]
+
+                # Support single image path or multiple image paths
+                if image_paths:
+                    for ip in image_paths:
+                        try:
+                            img = PIL.Image.open(ip)
+                            content.append(img)
+                        except Exception as e:
+                            print(f"Warning: failed to open image {ip}: {e}")
+                elif image_path:
+                    try:
+                        img = PIL.Image.open(image_path)
+                        content.append(img)
+                    except Exception as e:
+                        print(f"Warning: failed to open image {image_path}: {e}")
                 
                 # Use async generation
                 response = await model.generate_content_async(
