@@ -1,6 +1,7 @@
-'use client';
+"use client";
 
 import React, { useMemo } from 'react';
+import DiagnosticTestButton from './DiagnosticTestButton';
 import {
   Radar,
   RadarChart,
@@ -128,6 +129,9 @@ export default function KnowledgeMasteryDashboard({ data }: KnowledgeMasteryDash
             <br />
             明天的「今日复习」将优先为您推送以上领域的专项练习。
           </p>
+        </div>
+        <div className="mt-4">
+          <DiagnosticTestButton />
         </div>
 
       </div>
