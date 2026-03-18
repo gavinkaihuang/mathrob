@@ -6,6 +6,8 @@ import { LatexRenderer } from '@/components/LatexRenderer';
 import { MarkdownRenderer } from '@/components/MarkdownRenderer';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
+import clsx from 'clsx';
+import { twMerge } from 'tailwind-merge';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -44,7 +46,8 @@ export default function ExamDetailPage() {
           const data = await res.json();
           setExam(data);
         } else {
-          console.error('Failed to load exam detail');
+          const errorText = await res.text();
+          console.error(`Failed to load exam detail: ${res.status} ${res.statusText}`, errorText);
         }
       } catch (error) {
         console.error('Error loading exam:', error);
@@ -69,7 +72,20 @@ export default function ExamDetailPage() {
   if (!exam) {
     return (
       <main className="p-8 max-w-6xl mx-auto">
-        <div className="text-center text-gray-500">无法加载试卷详情</div>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-6">
+          <h2 className="text-red-900 font-bold text-lg mb-2">无法加载试卷详情</h2>
+          <p className="text-red-700 mb-4">试卷 ID: {examId}</p>
+          <p className="text-red-600 text-sm mb-4">可能的原因：</p>
+          <ul className="text-red-600 text-sm list-disc list-inside mb-4 space-y-1">
+            <li>试卷不存在或已被删除</li>
+            <li>您没有权限访问此试卷</li>
+            <li>网络连接可能有问题</li>
+            <li>后端 API 可能未正确配置</li>
+          </ul>
+          <Link href="/exams/history" className="text-indigo-600 hover:text-indigo-800 text-sm">
+            ← 返回档案库
+          </Link>
+        </div>
       </main>
     );
   }
@@ -150,31 +166,74 @@ export default function ExamDetailPage() {
           {exam.results && exam.results.length > 0 ? (
             <div className="space-y-6">
               {exam.results.map((result, idx) => {
-                const isCorrect = result.score === result.max_score;
+                const score = Number(result.score ?? 0);
+                const maxScore = Number(result.max_score ?? 0);
+                const isFull = maxScore > 0 && score === maxScore;
+                const isZero = score === 0;
+                const isPartial = score > 0 && score < maxScore;
+
+                const theme = isFull
+                  ? {
+                      headerBg: 'bg-emerald-50',
+                      headerText: 'text-emerald-700',
+                      border: 'border-emerald-200',
+                      scoreText: 'text-emerald-700',
+                      badgeBg: 'bg-emerald-100',
+                      badgeText: 'text-emerald-800',
+                      accent: 'border-emerald-500',
+                      icon: '✅',
+                    }
+                  : isZero
+                  ? {
+                      headerBg: 'bg-rose-50',
+                      headerText: 'text-rose-700',
+                      border: 'border-rose-200',
+                      scoreText: 'text-rose-700',
+                      badgeBg: 'bg-rose-100',
+                      badgeText: 'text-rose-800',
+                      accent: 'border-rose-500',
+                      icon: '❌',
+                    }
+                  : {
+                      headerBg: 'bg-amber-50',
+                      headerText: 'text-amber-700',
+                      border: 'border-amber-200',
+                      scoreText: 'text-amber-700',
+                      badgeBg: 'bg-amber-100',
+                      badgeText: 'text-amber-800',
+                      accent: 'border-amber-500',
+                      icon: '⚠️',
+                    };
+
+                const outerClass = twMerge('border rounded-lg overflow-hidden', theme.border, 'bg-white');
+                const headerClass = clsx('px-6 py-4', theme.headerBg);
+                const titleClass = clsx('text-lg font-bold', theme.headerText);
+                const scoreClass = clsx('text-2xl font-black flex items-center gap-2', theme.scoreText);
+                const badgeClass = clsx('inline-flex items-center px-2 py-0.5 rounded text-xs font-medium', theme.badgeBg, theme.badgeText);
+
                 return (
-                  <div
-                    key={idx}
-                    className={`border rounded-lg overflow-hidden ${
-                      isCorrect ? 'border-emerald-200 bg-emerald-50' : 'border-rose-200 bg-rose-50'
-                    }`}
-                  >
+                  <div key={idx} className={outerClass}>
                     {/* Question Header */}
-                    <div className="bg-gradient-to-r from-slate-700 to-slate-900 px-6 py-4 text-white">
+                    <div className={headerClass}>
                       <div className="flex justify-between items-center">
-                        <div className="text-lg font-bold">第 {result.problem_number} 题</div>
-                        <div className="text-2xl font-black">
-                          {result.score} <span className="text-sm font-normal">/ {result.max_score}</span>
+                        <div className={titleClass}>第 {result.problem_number} 题</div>
+                        <div className={scoreClass}>
+                          <span aria-hidden>{theme.icon}</span>
+                          <span>{score}</span>
+                          <span className="text-sm font-normal">/ {maxScore}</span>
                         </div>
                       </div>
                       {result.knowledge_tag && (
-                        <div className="text-sm text-slate-200 mt-2">📚 知识点: {result.knowledge_tag}</div>
+                        <div className={clsx('text-sm mt-2', theme.headerText)}>
+                          <span className={badgeClass}>📚 {result.knowledge_tag}</span>
+                        </div>
                       )}
                     </div>
 
                     {/* Question and Answer Section */}
                     <div className="px-6 py-4 space-y-4">
                       {/* Original Question */}
-                      <div className="border-l-4 border-slate-400 bg-white rounded p-4">
+                      <div className={clsx('border-l-4 bg-white rounded p-4', theme.accent)}>
                         <div className="text-sm font-semibold text-slate-600 mb-2">【原题】</div>
                         {result.original_question_text ? (
                           <MarkdownRenderer content={result.original_question_text} className="text-sm" />
@@ -184,7 +243,7 @@ export default function ExamDetailPage() {
                       </div>
 
                       {/* User Answer */}
-                      <div className="border-l-4 border-blue-400 bg-white rounded p-4">
+                      <div className={clsx('border-l-4 bg-white rounded p-4', theme.accent)}>
                         <div className="text-sm font-semibold text-blue-600 mb-2">【你的解答】</div>
                         {result.user_answer_text ? (
                           <MarkdownRenderer content={result.user_answer_text} className="text-sm" />
@@ -194,7 +253,7 @@ export default function ExamDetailPage() {
                       </div>
 
                       {/* AI Feedback */}
-                      <div className="border-l-4 border-indigo-400 bg-white rounded p-4">
+                      <div className={clsx('border-l-4 bg-white rounded p-4', theme.accent)}>
                         <div className="text-sm font-semibold text-indigo-600 mb-2">【AI 批改反馈】</div>
                         {result.feedback ? (
                           <MarkdownRenderer content={result.feedback} className="text-sm" />

@@ -1443,45 +1443,6 @@ def exams_history(db: Session = Depends(get_db), current_user: User = Depends(ge
     ]
 
 
-@router.get('/exams/{exam_id}')
-def exam_detail(exam_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    from ..models import ExamRecord, ExamProblemResult
-    exam = db.query(ExamRecord).filter(ExamRecord.id == exam_id, ExamRecord.user_id == current_user.id).first()
-    if not exam:
-        raise HTTPException(status_code=404, detail='Exam not found')
-
-    results = db.query(ExamProblemResult).filter(ExamProblemResult.exam_id == exam.id).all()
-    
-    # Apply natural sorting by problem number (handles "1", "10", "2" → "1", "2", "10")
-    def _natural_sort_key_query(result):
-        num_str = str(result.problem_number).strip()
-        numbers = re.findall(r'\d+', num_str)
-        return tuple(int(n) for n in numbers) if numbers else (0, hash(num_str))
-    
-    results = sorted(results, key=_natural_sort_key_query)
-
-    return {
-        'id': exam.id,
-        'paper_name': exam.paper_name,
-        'created_at': exam.created_at,
-        'ai_model': exam.ai_model,
-        'total_score': exam.total_score,
-        'status': exam.status,
-        'overall_feedback': exam.overall_feedback or exam.overall_evaluation,
-        'image_urls': exam.image_urls or [],
-        'results': [
-            {
-                'problem_number': r.problem_number,
-                'score': r.score,
-                'max_score': r.max_score,
-                'knowledge_tag': r.knowledge_tag,
-                'feedback': r.feedback,
-                'original_question_text': r.original_question_text,
-                'user_answer_text': r.user_answer_text
-            } for r in results
-        ]
-    }
-
 @router.get("/exams/task_status/{task_id}")
 def get_exam_status(task_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from ..models import ExamRecord, ExamProblemResult
@@ -1520,6 +1481,46 @@ def get_exam_status(task_id: int, db: Session = Depends(get_db), current_user: U
         ]
         
     return response
+
+
+@router.get('/exams/{exam_id}')
+def exam_detail(exam_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from ..models import ExamRecord, ExamProblemResult
+    exam = db.query(ExamRecord).filter(ExamRecord.id == exam_id, ExamRecord.user_id == current_user.id).first()
+    if not exam:
+        raise HTTPException(status_code=404, detail='Exam not found')
+
+    results = db.query(ExamProblemResult).filter(ExamProblemResult.exam_id == exam.id).all()
+    
+    # Apply natural sorting by problem number (handles "1", "10", "2" → "1", "2", "10")
+    def _natural_sort_key_query(result):
+        num_str = str(result.problem_number).strip()
+        numbers = re.findall(r'\d+', num_str)
+        return tuple(int(n) for n in numbers) if numbers else (0, hash(num_str))
+    
+    results = sorted(results, key=_natural_sort_key_query)
+
+    return {
+        'id': exam.id,
+        'paper_name': exam.paper_name,
+        'created_at': exam.created_at,
+        'ai_model': exam.ai_model,
+        'total_score': exam.total_score,
+        'status': exam.status,
+        'overall_feedback': exam.overall_feedback or exam.overall_evaluation,
+        'image_urls': exam.image_urls or [],
+        'results': [
+            {
+                'problem_number': r.problem_number,
+                'score': r.score,
+                'max_score': r.max_score,
+                'knowledge_tag': r.knowledge_tag,
+                'feedback': r.feedback,
+                'original_question_text': r.original_question_text,
+                'user_answer_text': r.user_answer_text
+            } for r in results
+        ]
+    }
 
 @router.delete("/solution-attempts/{attempt_id}")
 async def delete_solution_attempt(attempt_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):

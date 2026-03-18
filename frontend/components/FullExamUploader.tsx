@@ -15,8 +15,7 @@ export default function FullExamUploader() {
     isUploading,
     statusResponse,
     error,
-    reset,
-    setOnCompletionCallback
+    reset
   } = useExamPolling();
   
   const questionFileInputRef = useRef<HTMLInputElement>(null);
@@ -24,15 +23,17 @@ export default function FullExamUploader() {
   const [questionDragActive, setQuestionDragActive] = useState(false);
   const [answerDragActive, setAnswerDragActive] = useState(false);
 
-  // 新增：设置完成回调，自动跳转到试卷详情页
+  // 监听上传完成，自动跳转到试卷详情页
   useEffect(() => {
-    setOnCompletionCallback((examId: number) => {
-      // 清空所有状态
-      reset();
-      // 自动跳转到试卷详情页
-      router.push(`/exams/${examId}`);
-    });
-  }, [setOnCompletionCallback, reset, router]);
+    if (statusResponse?.status === 'completed' && statusResponse?.exam_id) {
+      // 延迟以确保所有状态更新完成
+      const timer = setTimeout(() => {
+        reset();
+        router.push(`/exams/${statusResponse.exam_id}`);
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [statusResponse?.status, statusResponse?.exam_id, reset, router]);
 
   // ============================================================
   // Question Images Dropzone
