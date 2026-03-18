@@ -6,11 +6,14 @@ import { useExamPolling } from '@/hooks/useExamPolling';
 
 export default function FullExamUploader() {
   const router = useRouter();
+  const [examMode, setExamMode] = useState<'separated' | 'combined'>('separated');
   const {
     questionFiles,
     answerFiles,
+    combinedFiles,
     handleQuestionFilesChange,
     handleAnswerFilesChange,
+    handleCombinedFilesChange,
     uploadFiles,
     isUploading,
     statusResponse,
@@ -20,8 +23,10 @@ export default function FullExamUploader() {
   
   const questionFileInputRef = useRef<HTMLInputElement>(null);
   const answerFileInputRef = useRef<HTMLInputElement>(null);
+  const combinedFileInputRef = useRef<HTMLInputElement>(null);
   const [questionDragActive, setQuestionDragActive] = useState(false);
   const [answerDragActive, setAnswerDragActive] = useState(false);
+  const [combinedDragActive, setCombinedDragActive] = useState(false);
 
   // 监听上传完成，自动跳转到试卷详情页
   useEffect(() => {
@@ -109,9 +114,52 @@ export default function FullExamUploader() {
     handleAnswerFilesChange(newFiles);
   };
 
+  // ============================================================
+  // Combined Mode (Single) Images Dropzone
+  // ============================================================
+  const handleCombinedDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setCombinedDragActive(true);
+    } else if (e.type === "dragleave") {
+      setCombinedDragActive(false);
+    }
+  };
+
+  const handleCombinedDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setCombinedDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      const droppedFiles = Array.from(e.dataTransfer.files);
+      handleCombinedFilesChange([...combinedFiles, ...droppedFiles]);
+    }
+  };
+
+  const handleCombinedChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    if (e.target.files && e.target.files[0]) {
+      const selectedFiles = Array.from(e.target.files);
+      handleCombinedFilesChange([...combinedFiles, ...selectedFiles]);
+    }
+  };
+
+  const removeCombinedFile = (index: number) => {
+    const newFiles = [...combinedFiles];
+    newFiles.splice(index, 1);
+    handleCombinedFilesChange(newFiles);
+  };
+
   const triggerUpload = () => {
-    if (questionFiles.length > 0 && answerFiles.length > 0) {
-      uploadFiles(questionFiles, answerFiles);
+    if (examMode === 'separated') {
+      if (questionFiles.length > 0 && answerFiles.length > 0) {
+        uploadFiles(questionFiles, answerFiles, 'separated');
+      }
+    } else {
+      if (combinedFiles.length > 0) {
+        uploadFiles([], [], 'combined', combinedFiles);
+      }
     }
   };
 
@@ -177,12 +225,12 @@ export default function FullExamUploader() {
     );
   }
 
-  // 4. Setup / Upload State - Dual Dropzone
+  // 4. Setup / Upload State - Mode Selector + Conditional Upload
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-6">
       <h2 className="text-xl font-bold text-slate-800 mb-2">整卷智能批阅</h2>
       <p className="text-sm text-slate-500 mb-6">
-        分别上传试卷原题和答题卡。批阅完成后，将自动跳转至试卷档案详情页。
+        选择作答模式，上传相应的试卷照片。批阅完成后，将自动跳转至试卷档案详情页。
       </p>
 
       {error && (
@@ -192,98 +240,191 @@ export default function FullExamUploader() {
       )}
 
       {/* ============================================================ */}
-      {/* Section 1: Question Images Upload */}
+      {/* Mode Selector - Radio Group */}
       {/* ============================================================ */}
-      <div className="mb-8">
-        <div className="mb-3">
-          <h3 className="text-base font-bold text-slate-800 mb-1">【上传试卷原题】📖</h3>
-          <p className="text-xs text-slate-500">上传包含题目文本的照片（AI 将从第二区域的答题卡中提取答案）</p>
+      <div className="mb-8 p-4 bg-slate-50 rounded-xl border border-slate-200">
+        <p className="text-sm font-semibold text-slate-700 mb-3">选择作答模式：</p>
+        <div className="flex gap-6">
+          <label className="flex items-center cursor-pointer">
+            <input 
+              type="radio" 
+              name="exam_mode" 
+              value="separated" 
+              checked={examMode === 'separated'}
+              onChange={(e) => {
+                setExamMode('separated');
+                reset();
+              }}
+              className="w-4 h-4 text-blue-600 cursor-pointer"
+            />
+            <span className="ml-2 text-sm text-slate-700 font-medium">分离作答 (原卷 + 答题纸)</span>
+          </label>
+          <label className="flex items-center cursor-pointer">
+            <input 
+              type="radio" 
+              name="exam_mode" 
+              value="combined" 
+              checked={examMode === 'combined'}
+              onChange={(e) => {
+                setExamMode('combined');
+                reset();
+              }}
+              className="w-4 h-4 text-purple-600 cursor-pointer"
+            />
+            <span className="ml-2 text-sm text-slate-700 font-medium">卷面作答 (题目与解答合一)</span>
+          </label>
         </div>
+      </div>
 
-        <form onDragEnter={handleQuestionDrag} onSubmit={(e) => e.preventDefault()} className="mb-4">
-          <input ref={questionFileInputRef} type="file" multiple className="hidden" onChange={handleQuestionChange} accept="image/*" />
-          <div 
-            className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors cursor-pointer
-              ${questionDragActive ? "border-blue-500 bg-blue-50" : "border-slate-300 bg-slate-50 hover:bg-slate-100 hover:border-slate-400"}`}
-            onDragEnter={handleQuestionDrag} onDragLeave={handleQuestionDrag} onDragOver={handleQuestionDrag} onDrop={handleQuestionDrop}
-            onClick={() => questionFileInputRef.current?.click()}
-          >
-            <div className="text-3xl mb-2">📷</div>
-            <p className="text-slate-600 font-medium text-sm">点击或拖拽题目照片至此</p>
-            <p className="text-xs text-slate-400 mt-1">支持多张图片</p>
-          </div>
-        </form>
-
-        {questionFiles.length > 0 && (
-          <div className="mb-4">
-            <h4 className="text-xs font-bold text-slate-600 mb-2">已选择 {questionFiles.length} 张题目照片</h4>
-            <div className="flex flex-col gap-2 max-h-32 overflow-y-auto">
-              {questionFiles.map((file, idx) => (
-                <div key={idx} className="flex justify-between items-center bg-blue-50 p-2 rounded-lg border border-blue-200 text-xs">
-                  <span className="truncate max-w-[180px] text-slate-700">{file.name}</span>
-                  <button onClick={() => removeQuestionFile(idx)} className="text-red-500 hover:text-red-700 font-medium px-2">移除</button>
-                </div>
-              ))}
+      {/* ============================================================ */}
+      {/* Separated Mode Upload */}
+      {/* ============================================================ */}
+      {examMode === 'separated' && (
+        <>
+          <div className="mb-8">
+            <div className="mb-3">
+              <h3 className="text-base font-bold text-slate-800 mb-1">【上传试卷原题】📖</h3>
+              <p className="text-xs text-slate-500">上传包含题目文本的照片（AI 将从第二区域的答题卡中提取答案）</p>
             </div>
-          </div>
-        )}
-      </div>
 
-      {/* ============================================================ */}
-      {/* Section 2: Answer Images Upload */}
-      {/* ============================================================ */}
-      <div className="mb-8">
-        <div className="mb-3">
-          <h3 className="text-base font-bold text-slate-800 mb-1">【上传答题卡/答题纸】✍️</h3>
-          <p className="text-xs text-slate-500">上传学生手写答题的照片（AI 将仅基于此处内容进行评分）</p>
-        </div>
+            <form onDragEnter={handleQuestionDrag} onSubmit={(e) => e.preventDefault()} className="mb-4">
+              <input ref={questionFileInputRef} type="file" multiple className="hidden" onChange={handleQuestionChange} accept="image/*" />
+              <div 
+                className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors cursor-pointer
+                  ${questionDragActive ? "border-blue-500 bg-blue-50" : "border-slate-300 bg-slate-50 hover:bg-slate-100 hover:border-slate-400"}`}
+                onDragEnter={handleQuestionDrag} onDragLeave={handleQuestionDrag} onDragOver={handleQuestionDrag} onDrop={handleQuestionDrop}
+                onClick={() => questionFileInputRef.current?.click()}
+              >
+                <div className="text-3xl mb-2">📷</div>
+                <p className="text-slate-600 font-medium text-sm">点击或拖拽题目照片至此</p>
+                <p className="text-xs text-slate-400 mt-1">支持多张图片</p>
+              </div>
+            </form>
 
-        <form onDragEnter={handleAnswerDrag} onSubmit={(e) => e.preventDefault()} className="mb-4">
-          <input ref={answerFileInputRef} type="file" multiple className="hidden" onChange={handleAnswerChange} accept="image/*" />
-          <div 
-            className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors cursor-pointer
-              ${answerDragActive ? "border-emerald-500 bg-emerald-50" : "border-slate-300 bg-slate-50 hover:bg-slate-100 hover:border-slate-400"}`}
-            onDragEnter={handleAnswerDrag} onDragLeave={handleAnswerDrag} onDragOver={handleAnswerDrag} onDrop={handleAnswerDrop}
-            onClick={() => answerFileInputRef.current?.click()}
-          >
-            <div className="text-3xl mb-2">📝</div>
-            <p className="text-slate-600 font-medium text-sm">点击或拖拽答题卡照片至此</p>
-            <p className="text-xs text-slate-400 mt-1">支持多张图片</p>
-          </div>
-        </form>
-
-        {answerFiles.length > 0 && (
-          <div className="mb-4">
-            <h4 className="text-xs font-bold text-slate-600 mb-2">已选择 {answerFiles.length} 张答题卡照片</h4>
-            <div className="flex flex-col gap-2 max-h-32 overflow-y-auto">
-              {answerFiles.map((file, idx) => (
-                <div key={idx} className="flex justify-between items-center bg-emerald-50 p-2 rounded-lg border border-emerald-200 text-xs">
-                  <span className="truncate max-w-[180px] text-slate-700">{file.name}</span>
-                  <button onClick={() => removeAnswerFile(idx)} className="text-red-500 hover:text-red-700 font-medium px-2">移除</button>
+            {questionFiles.length > 0 && (
+              <div className="mb-4">
+                <h4 className="text-xs font-bold text-slate-600 mb-2">已选择 {questionFiles.length} 张题目照片</h4>
+                <div className="flex flex-col gap-2 max-h-32 overflow-y-auto">
+                  {questionFiles.map((file, idx) => (
+                    <div key={idx} className="flex justify-between items-center bg-blue-50 p-2 rounded-lg border border-blue-200 text-xs">
+                      <span className="truncate max-w-[180px] text-slate-700">{file.name}</span>
+                      <button onClick={() => removeQuestionFile(idx)} className="text-red-500 hover:text-red-700 font-medium px-2">移除</button>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              </div>
+            )}
           </div>
-        )}
-      </div>
+
+          <div className="mb-8">
+            <div className="mb-3">
+              <h3 className="text-base font-bold text-slate-800 mb-1">【上传答题卡/答题纸】✍️</h3>
+              <p className="text-xs text-slate-500">上传学生手写答题的照片（AI 将仅基于此处内容进行评分）</p>
+            </div>
+
+            <form onDragEnter={handleAnswerDrag} onSubmit={(e) => e.preventDefault()} className="mb-4">
+              <input ref={answerFileInputRef} type="file" multiple className="hidden" onChange={handleAnswerChange} accept="image/*" />
+              <div 
+                className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors cursor-pointer
+                  ${answerDragActive ? "border-emerald-500 bg-emerald-50" : "border-slate-300 bg-slate-50 hover:bg-slate-100 hover:border-slate-400"}`}
+                onDragEnter={handleAnswerDrag} onDragLeave={handleAnswerDrag} onDragOver={handleAnswerDrag} onDrop={handleAnswerDrop}
+                onClick={() => answerFileInputRef.current?.click()}
+              >
+                <div className="text-3xl mb-2">📝</div>
+                <p className="text-slate-600 font-medium text-sm">点击或拖拽答题卡照片至此</p>
+                <p className="text-xs text-slate-400 mt-1">支持多张图片</p>
+              </div>
+            </form>
+
+            {answerFiles.length > 0 && (
+              <div className="mb-4">
+                <h4 className="text-xs font-bold text-slate-600 mb-2">已选择 {answerFiles.length} 张答题卡照片</h4>
+                <div className="flex flex-col gap-2 max-h-32 overflow-y-auto">
+                  {answerFiles.map((file, idx) => (
+                    <div key={idx} className="flex justify-between items-center bg-emerald-50 p-2 rounded-lg border border-emerald-200 text-xs">
+                      <span className="truncate max-w-[180px] text-slate-700">{file.name}</span>
+                      <button onClick={() => removeAnswerFile(idx)} className="text-red-500 hover:text-red-700 font-medium px-2">移除</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex gap-3">
+            <button 
+              onClick={triggerUpload}
+              disabled={questionFiles.length === 0 || answerFiles.length === 0 || isUploading}
+              className="flex-1 py-3.5 bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-xl shadow-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isUploading ? '处理中...' : '开始智能批阅'}
+            </button>
+          </div>
+
+          {(questionFiles.length === 0 || answerFiles.length === 0) && !isUploading && (
+            <p className="text-xs text-slate-400 mt-3 text-center">
+              💡 提示：请同时上传试卷原题和答题卡才能开始批阅
+            </p>
+          )}
+        </>
+      )}
 
       {/* ============================================================ */}
-      {/* Submit Button */}
+      {/* Combined Mode Upload */}
       {/* ============================================================ */}
-      <div className="flex gap-3">
-        <button 
-          onClick={triggerUpload}
-          disabled={questionFiles.length === 0 || answerFiles.length === 0 || isUploading}
-          className="flex-1 py-3.5 bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-xl shadow-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {isUploading ? '处理中...' : '开始智能批阅'}
-        </button>
-      </div>
+      {examMode === 'combined' && (
+        <>
+          <div className="mb-8">
+            <div className="mb-3">
+              <h3 className="text-base font-bold text-slate-800 mb-1">【上传作答后的试卷】🗂️</h3>
+              <p className="text-xs text-slate-500">上传学生直接在试卷上作答后的照片（题目与解答在同一张纸上）</p>
+            </div>
 
-      {(questionFiles.length === 0 || answerFiles.length === 0) && !isUploading && (
-        <p className="text-xs text-slate-400 mt-3 text-center">
-          💡 提示：请同时上传试卷原题和答题卡才能开始批阅
-        </p>
+            <form onDragEnter={handleCombinedDrag} onSubmit={(e) => e.preventDefault()} className="mb-4">
+              <input ref={combinedFileInputRef} type="file" multiple className="hidden" onChange={handleCombinedChange} accept="image/*" />
+              <div 
+                className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors cursor-pointer
+                  ${combinedDragActive ? "border-purple-500 bg-purple-50" : "border-slate-300 bg-slate-50 hover:bg-slate-100 hover:border-slate-400"}`}
+                onDragEnter={handleCombinedDrag} onDragLeave={handleCombinedDrag} onDragOver={handleCombinedDrag} onDrop={handleCombinedDrop}
+                onClick={() => combinedFileInputRef.current?.click()}
+              >
+                <div className="text-4xl mb-2">📸</div>
+                <p className="text-slate-600 font-medium text-sm">点击或拖拽试卷照片至此</p>
+                <p className="text-xs text-slate-400 mt-1">支持多张图片。AI 将自动分离题目与解答部分</p>
+              </div>
+            </form>
+
+            {combinedFiles.length > 0 && (
+              <div className="mb-4">
+                <h4 className="text-xs font-bold text-slate-600 mb-2">已选择 {combinedFiles.length} 张试卷照片</h4>
+                <div className="flex flex-col gap-2 max-h-32 overflow-y-auto">
+                  {combinedFiles.map((file, idx) => (
+                    <div key={idx} className="flex justify-between items-center bg-purple-50 p-2 rounded-lg border border-purple-200 text-xs">
+                      <span className="truncate max-w-[180px] text-slate-700">{file.name}</span>
+                      <button onClick={() => removeCombinedFile(idx)} className="text-red-500 hover:text-red-700 font-medium px-2">移除</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex gap-3">
+            <button 
+              onClick={triggerUpload}
+              disabled={combinedFiles.length === 0 || isUploading}
+              className="flex-1 py-3.5 bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-xl shadow-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isUploading ? '处理中...' : '开始智能批阅'}
+            </button>
+          </div>
+
+          {combinedFiles.length === 0 && !isUploading && (
+            <p className="text-xs text-slate-400 mt-3 text-center">
+              💡 提示：请上传作答后的试卷照片才能开始批阅
+            </p>
+          )}
+        </>
       )}
     </div>
   );

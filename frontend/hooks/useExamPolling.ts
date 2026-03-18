@@ -23,6 +23,7 @@ export interface ExamStatusResponse {
 export function useExamPolling() {
   const [questionFiles, setQuestionFiles] = useState<File[]>([]);
   const [answerFiles, setAnswerFiles] = useState<File[]>([]);
+  const [combinedFiles, setCombinedFiles] = useState<File[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [taskId, setTaskId] = useState<number | null>(null);
   const [statusResponse, setStatusResponse] = useState<ExamStatusResponse | null>(null);
@@ -70,8 +71,14 @@ export function useExamPolling() {
     poll(); // immediate first call
   }, [onCompletionCallback]);
 
-  const uploadFiles = async (selectedQuestionFiles: File[], selectedAnswerFiles: File[]) => {
-    if (selectedQuestionFiles.length === 0 || selectedAnswerFiles.length === 0) return;
+  const uploadFiles = async (
+    selectedQuestionFiles: File[], 
+    selectedAnswerFiles: File[], 
+    examMode: 'separated' | 'combined' = 'separated',
+    selectedCombinedFiles: File[] = []
+  ) => {
+    if (examMode === 'separated' && (selectedQuestionFiles.length === 0 || selectedAnswerFiles.length === 0)) return;
+    if (examMode === 'combined' && selectedCombinedFiles.length === 0) return;
     
     setIsUploading(true);
     setError(null);
@@ -80,15 +87,25 @@ export function useExamPolling() {
     
     const formData = new FormData();
     
-    // Add question images
-    selectedQuestionFiles.forEach(file => {
-      formData.append('question_images', file);
-    });
+    // Add exam_mode parameter
+    formData.append('exam_mode', examMode);
     
-    // Add answer images
-    selectedAnswerFiles.forEach(file => {
-      formData.append('answer_images', file);
-    });
+    if (examMode === 'separated') {
+      // Add question images
+      selectedQuestionFiles.forEach(file => {
+        formData.append('question_images', file);
+      });
+      
+      // Add answer images
+      selectedAnswerFiles.forEach(file => {
+        formData.append('answer_images', file);
+      });
+    } else {
+      // Combined mode: all images go into combined_images
+      selectedCombinedFiles.forEach(file => {
+        formData.append('combined_images', file);
+      });
+    }
 
     try {
       const res = await fetchWithAuth('/api/exams/upload_and_grade', {
@@ -122,10 +139,15 @@ export function useExamPolling() {
   const handleAnswerFilesChange = (newFiles: File[]) => {
     setAnswerFiles(newFiles);
   };
+
+  const handleCombinedFilesChange = (newFiles: File[]) => {
+    setCombinedFiles(newFiles);
+  };
   
   const reset = () => {
     setQuestionFiles([]);
     setAnswerFiles([]);
+    setCombinedFiles([]);
     setIsUploading(false);
     setTaskId(null);
     setStatusResponse(null);
@@ -138,8 +160,10 @@ export function useExamPolling() {
   return {
     questionFiles,
     answerFiles,
+    combinedFiles,
     handleQuestionFilesChange,
     handleAnswerFilesChange,
+    handleCombinedFilesChange,
     uploadFiles,
     isUploading,
     statusResponse,

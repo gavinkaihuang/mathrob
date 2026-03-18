@@ -1358,8 +1358,10 @@ async def process_full_exam(
 @router.post("/exams/upload_and_grade")
 async def upload_and_grade_exam(
     background_tasks: BackgroundTasks,
-    question_images: List[UploadFile] = File(...),
-    answer_images: List[UploadFile] = File(...),
+    exam_mode: str = Form('separated'),
+    question_images: List[UploadFile] = File(default=[]),
+    answer_images: List[UploadFile] = File(default=[]),
+    combined_images: List[UploadFile] = File(default=[]),
     paper_name: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -1368,39 +1370,71 @@ async def upload_and_grade_exam(
     
     question_image_paths = []
     answer_image_paths = []
+    combined_image_paths = []
     all_image_urls = []
     
     # Ensure exams subdir exists
     exams_dir = os.path.join(UPLOAD_DIR, "exams")
     os.makedirs(exams_dir, exist_ok=True)
 
-    # Save question images
-    for file in question_images:
-        safe_filename = f"exam_{current_user.id}_{int(datetime.utcnow().timestamp())}_q_{file.filename}"
-        file_location = os.path.join(exams_dir, safe_filename)
+    if exam_mode == 'separated':
+        # ============================================================
+        # SEPARATED MODE: Process question and answer images separately
+        # ============================================================
+        
+        # Save question images
+        for file in question_images:
+            safe_filename = f"exam_{current_user.id}_{int(datetime.utcnow().timestamp())}_q_{file.filename}"
+            file_location = os.path.join(exams_dir, safe_filename)
 
-        with open(file_location, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
+            with open(file_location, "wb") as buffer:
+                content = await file.read()
+                buffer.write(content)
 
-        question_image_paths.append(file_location)
-        # Build URL relative to UPLOAD_DIR (which is mounted at /static)
-        rel_path = os.path.relpath(file_location, UPLOAD_DIR).replace('\\', '/')
-        all_image_urls.append(f"/static/{rel_path}")
+            question_image_paths.append(file_location)
+            # Build URL relative to UPLOAD_DIR (which is mounted at /static)
+            rel_path = os.path.relpath(file_location, UPLOAD_DIR).replace('\\', '/')
+            all_image_urls.append(f"/static/{rel_path}")
 
-    # Save answer images
-    for file in answer_images:
-        safe_filename = f"exam_{current_user.id}_{int(datetime.utcnow().timestamp())}_a_{file.filename}"
-        file_location = os.path.join(exams_dir, safe_filename)
+        # Save answer images
+        for file in answer_images:
+            safe_filename = f"exam_{current_user.id}_{int(datetime.utcnow().timestamp())}_a_{file.filename}"
+            file_location = os.path.join(exams_dir, safe_filename)
 
-        with open(file_location, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
+            with open(file_location, "wb") as buffer:
+                content = await file.read()
+                buffer.write(content)
 
-        answer_image_paths.append(file_location)
-        # Build URL relative to UPLOAD_DIR (which is mounted at /static)
-        rel_path = os.path.relpath(file_location, UPLOAD_DIR).replace('\\', '/')
-        all_image_urls.append(f"/static/{rel_path}")
+            answer_image_paths.append(file_location)
+            # Build URL relative to UPLOAD_DIR (which is mounted at /static)
+            rel_path = os.path.relpath(file_location, UPLOAD_DIR).replace('\\', '/')
+            all_image_urls.append(f"/static/{rel_path}")
+    
+    elif exam_mode == 'combined':
+        # ============================================================
+        # COMBINED MODE: Process all images as combined (卷面作答)
+        # ============================================================
+        
+        # Save combined mode images
+        for file in combined_images:
+            safe_filename = f"exam_{current_user.id}_{int(datetime.utcnow().timestamp())}_c_{file.filename}"
+            file_location = os.path.join(exams_dir, safe_filename)
+
+            with open(file_location, "wb") as buffer:
+                content = await file.read()
+                buffer.write(content)
+
+            combined_image_paths.append(file_location)
+            # Build URL relative to UPLOAD_DIR (which is mounted at /static)
+            rel_path = os.path.relpath(file_location, UPLOAD_DIR).replace('\\', '/')
+            all_image_urls.append(f"/static/{rel_path}")
+        
+        # For combined mode, treat combined images as both question and answer
+        question_image_paths = combined_image_paths
+        answer_image_paths = combined_image_paths
+        
+    else:
+        raise ValueError(f"Invalid exam_mode: {exam_mode}")
         
     # Create Task Record
     exam_record = ExamRecord(
