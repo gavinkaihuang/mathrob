@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { fetchWithAuth } from '@/utils/api';
+import { LatexRenderer } from '@/components/LatexRenderer';
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 import Link from 'next/link';
 
@@ -141,12 +142,16 @@ export default function ExamHistoryPage() {
                         <div className="space-y-3">
                           <div className="bg-gray-50 p-3 rounded-md text-sm text-slate-700">
                             <div className="font-semibold text-sm text-gray-600 mb-1">【原题】</div>
-                            <div className="whitespace-pre-wrap">{r.original_question_text || '无'}</div>
+                            <div>
+                              <LatexRenderer content={r.original_question_text || '无'} />
+                            </div>
                           </div>
 
                           <div className="bg-blue-50 p-3 rounded-md text-sm text-slate-700">
                             <div className="font-semibold text-sm text-blue-600 mb-1">【你的解答】</div>
-                            <div className="whitespace-pre-wrap">{r.user_answer_text || '无'}</div>
+                            <div>
+                              <LatexRenderer content={r.user_answer_text || '无'} />
+                            </div>
                           </div>
 
                           <div className={`p-3 rounded-md text-sm ${r.score === r.max_score ? 'border border-emerald-200 bg-emerald-50' : 'border border-rose-200 bg-rose-50'}`}>
@@ -154,7 +159,9 @@ export default function ExamHistoryPage() {
                               <div className="font-semibold">AI 批改反馈</div>
                               <div className="font-bold">得分: {r.score} / {r.max_score}</div>
                             </div>
-                            <div className="text-sm text-slate-700 whitespace-pre-wrap">{r.feedback || '无'}</div>
+                            <div className="text-sm text-slate-700">
+                              <LatexRenderer content={r.feedback || '无'} />
+                            </div>
                             <div className="text-xs text-gray-500 mt-2">知识点: {r.knowledge_tag}</div>
                           </div>
                         </div>

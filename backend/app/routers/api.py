@@ -7,6 +7,7 @@ from ..models import Problem, KnowledgePoint, KnowledgeNode, LearningRecord, Sol
 import os
 import json
 import re
+import asyncio
 from datetime import datetime
 from ..services.ai_service import AIService, AIServiceException
 from ..auth_deps import get_current_user
@@ -790,141 +791,394 @@ class ExamSessionSchema(BaseModel):
     class Config:
         from_attributes = True
 
-async def process_full_exam(task_id: int, user_id: int, image_paths: List[str], image_urls: List[str] = None):
-    # Note: We must create a new DB session inside the background task
-    from ..database import SessionLocal
-    from ..models import ExamRecord, ExamProblemResult, KnowledgeNode, UserKnowledgeMastery
-    from ..main import ai_service
-    db = SessionLocal()
-    try:
-        # Get standard knowledge tags for strict prompt constraints
-        nodes = db.query(KnowledgeNode).all()
-        standard_tags_list = [n.name for n in nodes]
+def _sanitize_json_string(s: str) -> str:
+    r"""
+    Sanitize JSON-ish text to handle unescaped backslashes and control chars
+    This handles LaTeX commands like \sqrt, \frac that weren't escaped properly
+    """
+    # Normalize line endings
+    s = s.replace('\r\n', '\n').replace('\r', '\n')
+    # Remove control chars except \n, \t
+    s = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', s)
+    # Escape single backslashes that are not part of valid JSON escapes (\", \\, \/, \b, \f, \n, \r, \t, \uXXXX)
+    s = re.sub(r'(?<!\\)\\(?!["\\/bfnrtu])', r'\\\\', s)
+    return s
 
-        # Build upgraded system prompt requesting structured extraction including paper title,
-        # original question text and user answer text for each problem.
-        prompt = f'''
-你是一位资深数学阅卷专家。请阅读提供的试卷与答题照片，严格输出以下 JSON 结构（不要包含多余文本）：
-{ {
-    "paper_title": "精准提取图片中的试卷大标题（如 '2025年高三一模数学'）。若无明显标题，请生成专业名称。",
-    "total_score": 85,
-    "overall_feedback": "整体评价和学情分析（简洁的 Markdown 文本）",
+
+async def _extract_exam_structure(image_paths: List[str], ai_service):
+    """
+    Stage 1: Lightweight Structure Extraction
+    Purpose: Scan all pages, build question index without detailed grading
+    Returns: {'paper_title', 'question_numbers', 'page_count', 'model'}
+    """
+    prompt = f'''你是一个试卷结构分析助手。请浏览提供的所有试卷和答题纸图片，识别出图片中包含的所有"独立数学大题"的题号。
+你不需要批改，只需要告诉我一共有哪些题。
+
+严格输出 JSON 格式，不要任何额外文本：
+{{
+    "paper_title": "提取的试卷标题或名称",
+    "total_question_count": 8,
+    "question_numbers": ["1", "2", "3", "4", "5", "6", "7", "8"],
+    "notes": "如果有任何题号缺失或不清楚的地方，请说明"
+}}
+'''
+    
+    text, used_model, _ = await ai_service.call_gemini_with_fallback('teaching', prompt, image_paths=image_paths)
+    
+    # Parse JSON with aggressive sanitization
+    text = text.strip()
+    for prefix in ["```json", "```"]:
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    if text.endswith("```"):
+        text = text[:-3]
+    
+    start = text.find('{')
+    end = text.rfind('}')
+    json_text = text[start:end+1] if start != -1 and end != -1 else text
+    
+    # Try multiple sanitization strategies
+    last_exc = None
+    for candidate in [json_text, _sanitize_json_string(json_text)]:
+        try:
+            result = json.loads(candidate.strip())
+            last_exc = None
+            break
+        except Exception as e:
+            last_exc = e
+    
+    if last_exc:
+        # Last resort: try unicode-escape decode then sanitize
+        try:
+            alt = json_text.encode('utf-8').decode('unicode_escape')
+            alt2 = _sanitize_json_string(alt)
+            result = json.loads(alt2.strip())
+            last_exc = None
+        except Exception as e3:
+            last_exc = e3
+    
+    if last_exc:
+        raise ValueError(f"Failed to parse JSON from Stage 1: {str(last_exc)}\nJSON text: {json_text[:200]}")
+    
+    return {
+        'paper_title': result.get('paper_title', '试卷'),
+        'question_numbers': result.get('question_numbers', []),
+        'total_question_count': result.get('total_question_count', 0),
+        'model': used_model,
+        'page_count': len(image_paths)
+    }
+
+
+async def _grade_exam_batch(
+    batch_numbers: List[str],
+    image_paths: List[str],
+    standard_tags_list: List[str],
+    ai_service,
+    batch_index: int,
+    total_batches: int
+):
+    """
+    Stage 2: Focused Batch Grading
+    Purpose: Grade 2-3 questions per batch with all images for context
+    Returns: {'problems': [...], 'batch_index', 'model', 'tokens_used'}
+    """
+    batch_str = ", ".join(batch_numbers)
+    
+    prompt = f'''你是一位严格的高中数学阅卷专家。请在提供的试卷和答卷图片中，**仅仅寻找并批改第 {batch_str} 题**。
+请忽略其他题号的内容。对这几道题进行深度 OCR 提取、数学逻辑研判，并给出最终得分。
+
+## 重要提示
+- 这是批改任务的第 {batch_index+1}/{total_batches} 批
+- 题号列表：{batch_str}
+- 每题必须包含完整的原题文本、学生答案和批改反馈
+
+## 知识点标签限制
+**只能**从以下列表中选择：{standard_tags_list}
+
+## 输出格式（严格JSON）
+{{
+    "batch_index": {batch_index},
+    "graded_question_count": {len(batch_numbers)},
     "problems": [
-        {
+        {{
             "problem_number": "1",
-            "original_question_text": "精准识别并输出该题的完整原题文本",
-            "user_answer_text": "识别并输出学生手写的具体解答过程",
+            "original_question_text": "完整原题文本",
+            "user_answer_text": "学生手写答案",
             "score": 10,
             "max_score": 10,
-            "knowledge_tag": "对数运算",
-            "feedback": "批改意见与扣分点..."
-        }
+            "knowledge_tag": "知识点名称",
+            "feedback": "批改反馈"
+        }}
     ]
-} }
-
-附注：当返回知识点标签时，**只能**从以下列表中选择：{standard_tags_list}。
-请保证 JSON 字段完整且可解析，所有文本字段尽量保留换行（使用 \n 表示）。
+}}
 '''
-
-        # We use 'teaching' model as it handles multi-modal well
-        text, used_model, _ = await ai_service.call_gemini_with_fallback('teaching', prompt, image_paths=image_paths)
-
-        text = text.strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-
-        # Extract JSON object between the first '{' and last '}' to avoid surrounding commentary
-        start = text.find('{')
-        end = text.rfind('}')
-        json_text = text[start:end+1] if start != -1 and end != -1 else text
-
-        # Persist raw AI text to SystemLog and to exam.overall_evaluation for inspection
+    
+    text, used_model, tokens = await ai_service.call_gemini_with_fallback('teaching', prompt, image_paths=image_paths)
+    
+    # Parse JSON with aggressive sanitization
+    text = text.strip()
+    for prefix in ["```json", "```"]:
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    if text.endswith("```"):
+        text = text[:-3]
+    
+    start = text.find('{')
+    end = text.rfind('}')
+    json_text = text[start:end+1] if start != -1 and end != -1 else text
+    
+    # Try multiple sanitization strategies
+    last_exc = None
+    for candidate in [json_text, _sanitize_json_string(json_text)]:
         try:
-            from ..models import SystemLog
-            log = SystemLog(level="ERROR", category="teaching", message="Raw AI response for exam",
-                            details={"text_preview": text[:200]},)
-            db.add(log)
-            db.commit()
-        except Exception:
-            db.rollback()
+            result = json.loads(candidate.strip())
+            last_exc = None
+            break
+        except Exception as e:
+            last_exc = e
+    
+    if last_exc:
+        # Last resort: try unicode-escape decode then sanitize
+        try:
+            alt = json_text.encode('utf-8').decode('unicode_escape')
+            alt2 = _sanitize_json_string(alt)
+            result = json.loads(alt2.strip())
+            last_exc = None
+        except Exception as e3:
+            last_exc = e3
+    
+    if last_exc:
+        raise ValueError(f"Failed to parse JSON from Stage 2 Batch {batch_index}: {str(last_exc)}\nJSON text: {json_text[:200]}")
+    
+    return {
+        'batch_index': batch_index,
+        'problems': result.get('problems', []),
+        'model': used_model,
+        'tokens_used': tokens,
+        'graded_count': result.get('graded_question_count', 0)
+    }
 
-        # Helper: sanitize JSON-ish text to handle unescaped backslashes and control chars
-        def sanitize_candidate(s: str) -> str:
-            # Normalize line endings
-            s = s.replace('\r\n', '\n').replace('\r', '\n')
-            # Remove control chars except \n, \t
-            s = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', s)
-            # Escape single backslashes that are not part of valid JSON escapes
-            s = re.sub(r'(?<!\\)\\(?!["\\/bfnrtu])', r'\\\\', s)
-            return s
 
-        last_exc = None
-        # Try parsing progressively more aggressive sanitization strategies
-        for candidate in [json_text, sanitize_candidate(json_text)]:
-            try:
-                result_json = json.loads(candidate.strip())
-                last_exc = None
-                break
-            except Exception as e:
-                last_exc = e
+async def _generate_overall_feedback(
+    all_problems: List[dict],
+    paper_title: str,
+    total_score: float,
+    ai_service
+):
+    """
+    Generate comprehensive feedback based on all graded problems
+    """
+    problem_summary = "\n".join([
+        f"- 题{p['problem_number']}: {p['score']}/{p['max_score']} ({p['knowledge_tag']})"
+        for p in all_problems
+    ])
+    
+    prompt = f'''基于以下批改结果，生成一份简洁的学生学情分析反馈。
 
-        if last_exc:
-            # As a last resort, try unicode-escape decode then sanitize
-            try:
-                alt = json_text.encode('utf-8').decode('unicode_escape')
-                alt2 = sanitize_candidate(alt)
-                result_json = json.loads(alt2.strip())
-                last_exc = None
-            except Exception as e3:
-                last_exc = e3
+试卷：{paper_title}
+总分：{total_score}
 
-        if last_exc:
-            # Save the raw text into exam.overall_evaluation for manual inspection and raise
-            exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
-            if exam:
-                exam.status = 'failed'
-                exam.overall_evaluation = f"AI Raw Text (truncated): {text[:200]}\n\nParseError: {str(last_exc)}"
-                db.commit()
-            raise last_exc
+题目成绩概览：
+{problem_summary}
 
-        # Save results 
+请生成一份 50-100 字的学生学情分析，包括：
+1. 总体表现评价
+2. 主要优势领域
+3. 需要改进的方向
+
+输出纯文本，无需 JSON 格式。
+'''
+    
+    text, used_model, _ = await ai_service.call_gemini_with_fallback('teaching', prompt, image_paths=None)
+    return text.strip()
+
+
+def _natural_sort_key(problem: dict) -> tuple:
+    """
+    Extract natural sort key from problem number for correct ordering
+    Handles: "1", "10", "2", "4(1)", "12a", etc.
+    Returns: tuple of integers for proper numeric ordering
+    """
+    num_str = str(problem.get("problem_number", "")).strip()
+    if not num_str:
+        return (0,)
+    
+    # Extract all digit sequences from problem_number
+    # e.g., "4(1)" → [4, 1], "12a" → [12]
+    numbers = re.findall(r'\d+', num_str)
+    
+    if numbers:
+        return tuple(int(n) for n in numbers)
+    else:
+        # Fallback: return string hash for non-numeric problem numbers
+        return (0, hash(num_str))
+
+
+async def process_full_exam(task_id: int, user_id: int, image_paths: List[str], image_urls: List[str] = None):
+    """
+    Two-Stage Exam Grading Pipeline:
+    Stage 1: Lightweight structure extraction (identify all question numbers)
+    Stage 2: Parallel batch grading (2-3 questions per batch using asyncio.gather)
+    Stage 3: Result aggregation and database persistence
+    """
+    from ..database import SessionLocal
+    from ..models import ExamRecord, ExamProblemResult, KnowledgeNode, UserKnowledgeMastery, SystemLog
+    from ..main import ai_service
+    
+    db = SessionLocal()
+    pipeline_start_time = datetime.utcnow()
+    
+    try:
+        # Get standard knowledge tags
+        nodes = db.query(KnowledgeNode).all()
+        standard_tags_list = [n.name for n in nodes]
+        
+        # ============================================================
+        # STAGE 1: STRUCTURE EXTRACTION (Lightweight Index Building)
+        # ============================================================
+        print(f"[Exam {task_id}] Stage 1: Extracting exam structure from {len(image_paths)} images...")
+        
+        structure = await _extract_exam_structure(image_paths, ai_service)
+        question_numbers = structure['question_numbers']
+        paper_title = structure['paper_title']
+        
+        print(f"[Exam {task_id}] Stage 1 Complete: Found {len(question_numbers)} questions: {question_numbers}")
+        
+        if not question_numbers:
+            raise ValueError("No questions detected in exam. OCR may have failed.")
+        
+        # Log Stage 1 completion
+        log_s1 = SystemLog(
+            level="INFO",
+            category="teaching",
+            message=f"Exam {task_id} Stage 1: Extracted {len(question_numbers)} questions",
+            details={
+                "stage": 1,
+                "paper_title": paper_title,
+                "question_numbers": question_numbers,
+                "model_used": structure['model']
+            }
+        )
+        db.add(log_s1)
+        db.commit()
+        
+        # ============================================================
+        # STAGE 2: PARALLEL BATCH GRADING (Chunked Processing)
+        # ============================================================
+        # Create batches of 2-3 questions each
+        batch_size = 3
+        batches = [
+            question_numbers[i:i+batch_size]
+            for i in range(0, len(question_numbers), batch_size)
+        ]
+        
+        print(f"[Exam {task_id}] Stage 2: Processing {len(batches)} batches with asyncio.gather...")
+        
+        # Create concurrent grading tasks
+        batch_tasks = [
+            _grade_exam_batch(
+                batch_numbers=batch,
+                image_paths=image_paths,
+                standard_tags_list=standard_tags_list,
+                ai_service=ai_service,
+                batch_index=idx,
+                total_batches=len(batches)
+            )
+            for idx, batch in enumerate(batches)
+        ]
+        
+        # Execute all batches concurrently
+        batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+        
+        # Check for errors
+        all_problems = []
+        batch_models = []
+        for result in batch_results:
+            if isinstance(result, Exception):
+                print(f"[Exam {task_id}] Batch grading error: {result}")
+                raise result
+            
+            problems = result.get('problems', [])
+            all_problems.extend(problems)
+            batch_models.append(result.get('model'))
+            
+            print(f"[Exam {task_id}] Batch {result['batch_index']}: Graded {result['graded_count']} questions")
+        
+        print(f"[Exam {task_id}] Stage 2 Complete: Total {len(all_problems)} problems graded")
+        
+        # Log Stage 2 completion
+        log_s2 = SystemLog(
+            level="INFO",
+            category="teaching",
+            message=f"Exam {task_id} Stage 2: Batch grading completed",
+            details={
+                "stage": 2,
+                "total_batches": len(batches),
+                "batch_size": batch_size,
+                "problems_graded": len(all_problems),
+                "models_used": list(set(batch_models))
+            }
+        )
+        db.add(log_s2)
+        db.commit()
+        
+        # ============================================================
+        # APPLY NATURAL SORTING TO ALL PROBLEMS
+        # ============================================================
+        # Sort problems by natural numeric order (not lexicographic)
+        # This fixes: "1", "10", "11", "2" → "1", "2", "10", "11"
+        # Also handles: "4(1)", "4(2)", "12a", etc.
+        print(f"[Exam {task_id}] Sorting {len(all_problems)} problems by natural order...")
+        all_problems.sort(key=_natural_sort_key)
+        
+        # Log the sorted problem numbers for verification
+        sorted_problem_numbers = [str(p.get('problem_number', '?')) for p in all_problems]
+        print(f"[Exam {task_id}] Problem order after sorting: {sorted_problem_numbers}")
+        
+        # ============================================================
+        # STAGE 3: RESULT AGGREGATION & DATABASE PERSISTENCE
+        # ============================================================
+        print(f"[Exam {task_id}] Stage 3: Aggregating results and saving to database...")
+        
         exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
         if not exam:
-            return # Task deleted/invalid
-
-        # Save parsed paper title if present
-        paper_title = result_json.get("paper_title") or result_json.get("paper_name")
-        if paper_title:
-            exam.paper_name = paper_title
-
-        # Persist image_urls if provided
-        if image_urls:
-            exam.image_urls = image_urls
-
-        exam.total_score = result_json.get("total_score", 0)
-        # Map older field name and new overall_feedback field
-        exam.overall_evaluation = result_json.get("overall_evaluation", result_json.get("comprehensive_report", ""))
-        exam.overall_feedback = result_json.get("comprehensive_report", result_json.get("overall_evaluation", ""))
-        # Persist AI model name if available
-        try:
-            # `used_model` was returned by the AI call
-            exam.ai_model = used_model
-        except Exception:
-            pass
+            raise ValueError(f"Exam record {task_id} not found")
+        
+        # Set basic exam info
+        exam.paper_name = paper_title
+        exam.image_urls = image_urls
+        
+        # Calculate total score
+        total_score = sum(p.get('score', 0) for p in all_problems)
+        exam.total_score = total_score
+        
+        # Use the first batch model or the latest
+        exam.ai_model = batch_models[0] if batch_models else "unknown"
+        
+        # Generate overall feedback
+        print(f"[Exam {task_id}] Generating overall feedback...")
+        overall_feedback = await _generate_overall_feedback(
+            all_problems=all_problems,
+            paper_title=paper_title,
+            total_score=total_score,
+            ai_service=ai_service
+        )
+        
+        exam.overall_feedback = overall_feedback
+        exam.overall_evaluation = f"Graded via two-stage pipeline on {datetime.utcnow().isoformat()}"
         exam.status = "completed"
         exam.completed_at = datetime.utcnow()
-
-        # Sync Knowledge & Save Problems
-        problems = result_json.get("problems", [])
-        for p in problems:
+        
+        # Save all problems to database
+        problem_save_count = 0
+        for p in all_problems:
+            if not p.get('problem_number'):
+                continue
+                
             tag = p.get("knowledge_tag", "未知")
             score = p.get("score", 0)
             max_score = p.get("max_score", 10)
-
+            
             # Save problem result
             prob_res = ExamProblemResult(
                 exam_id=exam.id,
@@ -937,19 +1191,19 @@ async def process_full_exam(task_id: int, user_id: int, image_paths: List[str], 
                 user_answer_text=p.get("user_answer_text", None)
             )
             db.add(prob_res)
-
+            problem_save_count += 1
+            
             # Update User Knowledge Mastery
             if max_score > 0 and tag in standard_tags_list:
                 mastery_ratio = score / max_score
-                ai_rating = round(mastery_ratio * 10, 1) # scale to 1-10
-
+                ai_rating = round(mastery_ratio * 10, 1)
+                
                 mastery_record = db.query(UserKnowledgeMastery).filter(
                     UserKnowledgeMastery.user_id == user_id,
                     UserKnowledgeMastery.knowledge_tag == tag
                 ).first()
-
+                
                 if mastery_record:
-                    # Blend old rating with new rating (weighted average prioritizing new)
                     old_rating = mastery_record.ai_assessed_rating or 5.0
                     mastery_record.ai_assessed_rating = round(old_rating * 0.4 + ai_rating * 0.6, 1)
                     self_r = mastery_record.user_self_rating or 5.0
@@ -962,17 +1216,54 @@ async def process_full_exam(task_id: int, user_id: int, image_paths: List[str], 
                         comprehensive_score=ai_rating
                     )
                     db.add(new_mastery)
-
+        
         db.commit()
-
+        
+        pipeline_duration = (datetime.utcnow() - pipeline_start_time).total_seconds()
+        
+        # Final log
+        log_s3 = SystemLog(
+            level="INFO",
+            category="teaching",
+            message=f"Exam {task_id} completed via two-stage pipeline",
+            details={
+                "stage": 3,
+                "problems_saved": problem_save_count,
+                "total_score": total_score,
+                "pipeline_duration_seconds": pipeline_duration,
+                "questions_expected": len(question_numbers),
+                "questions_graded": len(all_problems),
+                "completion_status": "SUCCESS" if problem_save_count == len(all_problems) else "PARTIAL"
+            }
+        )
+        db.add(log_s3)
+        db.commit()
+        
+        print(f"[Exam {task_id}] ✅ Pipeline completed in {pipeline_duration:.1f}s: {problem_save_count} problems saved")
+        
     except Exception as e:
-        print(f"Background Grading Failed: {e}")
-        exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
-        if exam:
-            exam.status = "failed"
-            exam.overall_evaluation = f"AI Error: {str(e)}"
+        print(f"[Exam {task_id}] ❌ Pipeline failed: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        try:
+            exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
+            if exam:
+                exam.status = "failed"
+                exam.overall_evaluation = f"Pipeline Error: {str(e)}"
+                db.commit()
+                
+            error_log = SystemLog(
+                level="ERROR",
+                category="teaching",
+                message=f"Exam {task_id} pipeline failed",
+                details={"error": str(e), "traceback": traceback.format_exc()[:500]}
+            )
+            db.add(error_log)
             db.commit()
-
+        except:
+            db.rollback()
+    
     finally:
         db.close()
 
@@ -1048,7 +1339,15 @@ def exam_detail(exam_id: int, db: Session = Depends(get_db), current_user: User 
     if not exam:
         raise HTTPException(status_code=404, detail='Exam not found')
 
-    results = db.query(ExamProblemResult).filter(ExamProblemResult.exam_id == exam.id).order_by(ExamProblemResult.problem_number.asc()).all()
+    results = db.query(ExamProblemResult).filter(ExamProblemResult.exam_id == exam.id).all()
+    
+    # Apply natural sorting by problem number (handles "1", "10", "2" → "1", "2", "10")
+    def _natural_sort_key_query(result):
+        num_str = str(result.problem_number).strip()
+        numbers = re.findall(r'\d+', num_str)
+        return tuple(int(n) for n in numbers) if numbers else (0, hash(num_str))
+    
+    results = sorted(results, key=_natural_sort_key_query)
 
     return {
         'id': exam.id,
