@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import { fetchWithAuth } from '@/utils/api';
 import { LatexRenderer } from '@/components/LatexRenderer';
+import { MarkdownRenderer } from '@/components/MarkdownRenderer';
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 import Link from 'next/link';
 
@@ -123,9 +124,13 @@ export default function ExamHistoryPage() {
                 </div>
               )}
 
-              <div className="prose max-w-none mb-6">
-                <h3 className="text-lg font-semibold">综合评价</h3>
-                <div className="text-sm text-slate-700 whitespace-pre-wrap">{selected.overall_feedback || '无'}</div>
+              <div className="mb-6">
+                <h3 className="text-lg font-semibold mb-3">综合评价</h3>
+                {selected.overall_feedback ? (
+                  <MarkdownRenderer content={selected.overall_feedback} />
+                ) : (
+                  <div className="text-sm text-slate-500">无综合评价</div>
+                )}
               </div>
 
               <div>
@@ -159,9 +164,11 @@ export default function ExamHistoryPage() {
                               <div className="font-semibold">AI 批改反馈</div>
                               <div className="font-bold">得分: {r.score} / {r.max_score}</div>
                             </div>
-                            <div className="text-sm text-slate-700">
-                              <LatexRenderer content={r.feedback || '无'} />
-                            </div>
+                            {r.feedback ? (
+                              <MarkdownRenderer content={r.feedback} className="text-sm" />
+                            ) : (
+                              <div className="text-sm text-slate-500">无反馈</div>
+                            )}
                             <div className="text-xs text-gray-500 mt-2">知识点: {r.knowledge_tag}</div>
                           </div>
                         </div>

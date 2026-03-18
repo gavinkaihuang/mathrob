@@ -11,6 +11,7 @@ import asyncio
 from datetime import datetime
 from ..services.ai_service import AIService, AIServiceException
 from ..auth_deps import get_current_user
+import PIL.Image
 
 UPLOAD_DIR = "backend/uploads"
 if not os.path.exists(UPLOAD_DIR):
@@ -805,25 +806,62 @@ def _sanitize_json_string(s: str) -> str:
     return s
 
 
-async def _extract_exam_structure(image_paths: List[str], ai_service):
+async def _extract_exam_structure(answer_image_paths: List[str], question_image_paths: List[str], ai_service):
     """
     Stage 1: Lightweight Structure Extraction
-    Purpose: Scan all pages, build question index without detailed grading
+    Purpose: Scan answer images ONLY to build question index, ignoring question drafts
+    
+    Key Architectural Change: Explicitly separates answer images from question images
+    to prevent AI from confusing draft work with the actual answers.
+    
     Returns: {'paper_title', 'question_numbers', 'page_count', 'model'}
     """
-    prompt = f'''你是一个试卷结构分析助手。请浏览提供的所有试卷和答题纸图片，识别出图片中包含的所有"独立数学大题"的题号。
-你不需要批改，只需要告诉我一共有哪些题。
+    prompt = f'''你是一个试卷结构分析助手。本次分析，我向你提供两组独立的图片资源：
+【第一组 - 学生答题卡/答题纸（共{len(answer_image_paths)}页）】：这些图片包含学生的最终作答
+【第二组 - 试卷原题（共{len(question_image_paths)}页）】：这些图片包含题目原文（仅用于理解题意）
+
+【核心指令 - 严格遵守】：
+1. **答案唯一来源**：你必须且只能从【学生答题卡/答题纸】中识别题号
+2. **无视草稿**：对于【试卷原题】上出现的任何手写笔迹、勾画或文字标注，必须**完全无视**
+3. **防止混淆**：绝不能将试卷原题上的手写内容误认为是学生答案
+
+请仅依赖第一组（答题卡）的内容，完整精确地列出所有题号。
 
 严格输出 JSON 格式，不要任何额外文本：
 {{
     "paper_title": "提取的试卷标题或名称",
-    "total_question_count": 8,
+    "total_question_count": {len(answer_image_paths)},
     "question_numbers": ["1", "2", "3", "4", "5", "6", "7", "8"],
     "notes": "如果有任何题号缺失或不清楚的地方，请说明"
 }}
 '''
     
-    text, used_model, _ = await ai_service.call_gemini_with_fallback('teaching', prompt, image_paths=image_paths)
+    # Build content list with explicit ordering:
+    # First add answer images, then question images
+    # This helps Gemini understand the context
+    content = [prompt]
+    
+    # Add answer images first (with inline text labels)
+    for i, img_path in enumerate(answer_image_paths):
+        try:
+            img = PIL.Image.open(img_path)
+            content.append(img)
+        except Exception as e:
+            print(f"Warning: failed to open answer image {img_path}: {e}")
+    
+    # Add question images second (with inline text labels)
+    for i, img_path in enumerate(question_image_paths):
+        try:
+            img = PIL.Image.open(img_path)
+            content.append(img)
+        except Exception as e:
+            print(f"Warning: failed to open question image {img_path}: {e}")
+    
+    # Call with pre-built content list
+    text, used_model, _ = await ai_service.call_gemini_with_fallback(
+        'teaching', 
+        content
+    )
     
     # Parse JSON with aggressive sanitization
     text = text.strip()
@@ -865,32 +903,46 @@ async def _extract_exam_structure(image_paths: List[str], ai_service):
         'question_numbers': result.get('question_numbers', []),
         'total_question_count': result.get('total_question_count', 0),
         'model': used_model,
-        'page_count': len(image_paths)
+        'page_count': len(answer_image_paths)
     }
 
 
 async def _grade_exam_batch(
     batch_numbers: List[str],
-    image_paths: List[str],
+    question_image_paths: List[str],
+    answer_image_paths: List[str],
     standard_tags_list: List[str],
     ai_service,
     batch_index: int,
     total_batches: int
 ):
     """
-    Stage 2: Focused Batch Grading
-    Purpose: Grade 2-3 questions per batch with all images for context
+    Stage 2: Focused Batch Grading with Image Separation
+    Purpose: Grade 2-3 questions per batch, using answer images as authoritative source
+    
+    Key Architectural Change: Explicitly separates question and answer images,
+    ensuring AI grades only based on student's final answers in the answer sheet.
+    
     Returns: {'problems': [...], 'batch_index', 'model', 'tokens_used'}
     """
     batch_str = ", ".join(batch_numbers)
     
-    prompt = f'''你是一位严格的高中数学阅卷专家。请在提供的试卷和答卷图片中，**仅仅寻找并批改第 {batch_str} 题**。
-请忽略其他题号的内容。对这几道题进行深度 OCR 提取、数学逻辑研判，并给出最终得分。
+    prompt = f'''你是一位严格的高中数学阅卷专家。本次批改，我向你提供两组独立的图片资源：
+【第一组 - 答题卡/答题纸（共{len(answer_image_paths)}页）】：包含学生的最终作答
+【第二组 - 试卷原题（共{len(question_image_paths)}页）】：包含题目的原始文本
 
-## 重要提示
+你需要批改第 {batch_str} 题。
+
+【绝对批改纪律 - 严格遵守】：
+1. **答案唯一来源**：你必须且只能从【学生答题卡/答题纸】中提取学生的答案进行批改。
+2. **题目理解参考**：【试卷原题】仅用于理解题意，不能作为学生答案的来源。
+3. **无视草稿**：对于【试卷原题】上出现的任何手写笔迹、勾画、选项填涂或草稿演算，必须**绝对无视**，绝不能作为评分依据。
+4. **防混淆比对**：对于选择题和填空题，必须在答题卡指定的题号位置寻找学生的最终结果。若答题卡上该题空白，即便原题上有任何手写内容，也必须判为未作答（0分）。
+
+## 批改任务信息
 - 这是批改任务的第 {batch_index+1}/{total_batches} 批
-- 题号列表：{batch_str}
-- 每题必须包含完整的原题文本、学生答案和批改反馈
+- 本批题号：{batch_str}
+- 每题必须包含完整的原题文本（来自试卷原题）、学生答案（来自答题卡）和批改反馈
 
 ## 知识点标签限制
 **只能**从以下列表中选择：{standard_tags_list}
@@ -902,18 +954,39 @@ async def _grade_exam_batch(
     "problems": [
         {{
             "problem_number": "1",
-            "original_question_text": "完整原题文本",
-            "user_answer_text": "学生手写答案",
+            "original_question_text": "从试卷原题中提取的完整原题文本",
+            "user_answer_text": "从答题卡中提取的学生手写答案",
             "score": 10,
             "max_score": 10,
             "knowledge_tag": "知识点名称",
-            "feedback": "批改反馈"
+            "feedback": "严格基于答题卡内容的批改反馈"
         }}
     ]
 }}
 '''
     
-    text, used_model, tokens = await ai_service.call_gemini_with_fallback('teaching', prompt, image_paths=image_paths)
+    # Build content list with explicit ordering:
+    # Answer images first (as authoritative source), then question images (for context)
+    content = [prompt]
+    
+    # Add answer images first (authoritative source)
+    for img_path in answer_image_paths:
+        try:
+            img = PIL.Image.open(img_path)
+            content.append(img)
+        except Exception as e:
+            print(f"Warning: failed to open answer image {img_path}: {e}")
+    
+    # Add question images second (context only)
+    for img_path in question_image_paths:
+        try:
+            img = PIL.Image.open(img_path)
+            content.append(img)
+        except Exception as e:
+            print(f"Warning: failed to open question image {img_path}: {e}")
+    
+    # Call with pre-built content list
+    text, used_model, tokens = await ai_service.call_gemini_with_fallback('teaching', content)
     
     # Parse JSON with aggressive sanitization
     text = text.strip()
@@ -1014,12 +1087,21 @@ def _natural_sort_key(problem: dict) -> tuple:
         return (0, hash(num_str))
 
 
-async def process_full_exam(task_id: int, user_id: int, image_paths: List[str], image_urls: List[str] = None):
+async def process_full_exam(
+    task_id: int, 
+    user_id: int, 
+    question_image_paths: List[str], 
+    answer_image_paths: List[str],
+    image_urls: List[str] = None
+):
     """
-    Two-Stage Exam Grading Pipeline:
-    Stage 1: Lightweight structure extraction (identify all question numbers)
+    Two-Stage Exam Grading Pipeline with Image Separation:
+    Stage 1: Lightweight structure extraction (identify all question numbers from answer images)
     Stage 2: Parallel batch grading (2-3 questions per batch using asyncio.gather)
     Stage 3: Result aggregation and database persistence
+    
+    Key Improvement: Explicitly separates question images from answer images
+    to prevent AI from using question drafts when grading.
     """
     from ..database import SessionLocal
     from ..models import ExamRecord, ExamProblemResult, KnowledgeNode, UserKnowledgeMastery, SystemLog
@@ -1036,9 +1118,13 @@ async def process_full_exam(task_id: int, user_id: int, image_paths: List[str], 
         # ============================================================
         # STAGE 1: STRUCTURE EXTRACTION (Lightweight Index Building)
         # ============================================================
-        print(f"[Exam {task_id}] Stage 1: Extracting exam structure from {len(image_paths)} images...")
+        print(f"[Exam {task_id}] Stage 1: Extracting exam structure from {len(answer_image_paths)} answer images...")
         
-        structure = await _extract_exam_structure(image_paths, ai_service)
+        structure = await _extract_exam_structure(
+            answer_image_paths=answer_image_paths,
+            question_image_paths=question_image_paths,
+            ai_service=ai_service
+        )
         question_numbers = structure['question_numbers']
         paper_title = structure['paper_title']
         
@@ -1078,7 +1164,8 @@ async def process_full_exam(task_id: int, user_id: int, image_paths: List[str], 
         batch_tasks = [
             _grade_exam_batch(
                 batch_numbers=batch,
-                image_paths=image_paths,
+                question_image_paths=question_image_paths,
+                answer_image_paths=answer_image_paths,
                 standard_tags_list=standard_tags_list,
                 ai_service=ai_service,
                 batch_index=idx,
@@ -1271,47 +1358,71 @@ async def process_full_exam(task_id: int, user_id: int, image_paths: List[str], 
 @router.post("/exams/upload_and_grade")
 async def upload_and_grade_exam(
     background_tasks: BackgroundTasks,
-    files: List[UploadFile] = File(...),
+    question_images: List[UploadFile] = File(...),
+    answer_images: List[UploadFile] = File(...),
     paper_name: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     from ..models import ExamRecord
     
-    saved_paths = []
-    image_urls = []
+    question_image_paths = []
+    answer_image_paths = []
+    all_image_urls = []
+    
     # Ensure exams subdir exists
     exams_dir = os.path.join(UPLOAD_DIR, "exams")
     os.makedirs(exams_dir, exist_ok=True)
 
-    # Save files into exams subdirectory and build accessible URLs under /static/
-    for file in files:
-        safe_filename = f"exam_{current_user.id}_{int(datetime.utcnow().timestamp())}_{file.filename}"
+    # Save question images
+    for file in question_images:
+        safe_filename = f"exam_{current_user.id}_{int(datetime.utcnow().timestamp())}_q_{file.filename}"
         file_location = os.path.join(exams_dir, safe_filename)
 
         with open(file_location, "wb") as buffer:
             content = await file.read()
             buffer.write(content)
 
-        saved_paths.append(file_location)
+        question_image_paths.append(file_location)
         # Build URL relative to UPLOAD_DIR (which is mounted at /static)
         rel_path = os.path.relpath(file_location, UPLOAD_DIR).replace('\\', '/')
-        image_urls.append(f"/static/{rel_path}")
+        all_image_urls.append(f"/static/{rel_path}")
+
+    # Save answer images
+    for file in answer_images:
+        safe_filename = f"exam_{current_user.id}_{int(datetime.utcnow().timestamp())}_a_{file.filename}"
+        file_location = os.path.join(exams_dir, safe_filename)
+
+        with open(file_location, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+
+        answer_image_paths.append(file_location)
+        # Build URL relative to UPLOAD_DIR (which is mounted at /static)
+        rel_path = os.path.relpath(file_location, UPLOAD_DIR).replace('\\', '/')
+        all_image_urls.append(f"/static/{rel_path}")
         
     # Create Task Record
     exam_record = ExamRecord(
         user_id=current_user.id,
         status="processing",
-        image_paths=saved_paths,
-        image_urls=image_urls,
+        image_paths=question_image_paths + answer_image_paths,  # Store all paths for reference
+        image_urls=all_image_urls,
         paper_name=(paper_name or f"摸底测试_{datetime.utcnow().strftime('%Y%m%d_%H%M')}")
     )
     db.add(exam_record)
     db.commit()
     db.refresh(exam_record)
     
-    # Dispatch Async Task
-    background_tasks.add_task(process_full_exam, task_id=exam_record.id, user_id=current_user.id, image_paths=saved_paths, image_urls=image_urls)
+    # Dispatch Async Task with separated image categories
+    background_tasks.add_task(
+        process_full_exam, 
+        task_id=exam_record.id, 
+        user_id=current_user.id, 
+        question_image_paths=question_image_paths,
+        answer_image_paths=answer_image_paths,
+        image_urls=all_image_urls
+    )
     
     return {"task_id": exam_record.id, "status": exam_record.status}
 
@@ -1384,6 +1495,7 @@ def get_exam_status(task_id: int, db: Session = Depends(get_db), current_user: U
         raise HTTPException(status_code=404, detail="Exam not found")
         
     response = {
+        "exam_id": exam.id,  # 新增：明确返回试卷 ID
         "id": exam.id,
         "status": exam.status,
         "total_score": exam.total_score,

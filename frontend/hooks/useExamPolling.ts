@@ -11,6 +11,7 @@ export interface ExamProblemResult {
 }
 
 export interface ExamStatusResponse {
+  exam_id: number;  // 新增：试卷 ID
   id: number;
   status: 'processing' | 'completed' | 'failed';
   total_score?: number;
@@ -20,11 +21,13 @@ export interface ExamStatusResponse {
 }
 
 export function useExamPolling() {
-  const [files, setFiles] = useState<File[]>([]);
+  const [questionFiles, setQuestionFiles] = useState<File[]>([]);
+  const [answerFiles, setAnswerFiles] = useState<File[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [taskId, setTaskId] = useState<number | null>(null);
   const [statusResponse, setStatusResponse] = useState<ExamStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [onCompletionCallback, setOnCompletionCallback] = useState<((examId: number) => void) | null>(null);
   
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -42,9 +45,17 @@ export function useExamPolling() {
         const data: ExamStatusResponse = await res.json();
         setStatusResponse(data);
         
-        if (data.status === 'completed' || data.status === 'failed') {
+        // 新增：当完成时，调用回调函数
+        if (data.status === 'completed' && onCompletionCallback) {
           if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
-          setIsUploading(false); // Done
+          setIsUploading(false);
+          // 延迟 100ms 确保状态更新完成后再回调
+          setTimeout(() => {
+            onCompletionCallback(data.exam_id);
+          }, 100);
+        } else if (data.status === 'failed') {
+          if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
+          setIsUploading(false);
         }
       } catch (err: any) {
         console.error("Polling error", err);
@@ -57,10 +68,10 @@ export function useExamPolling() {
     // Poll every 3 seconds
     pollingIntervalRef.current = setInterval(poll, 3000);
     poll(); // immediate first call
-  }, []);
+  }, [onCompletionCallback]);
 
-  const uploadFiles = async (selectedFiles: File[]) => {
-    if (selectedFiles.length === 0) return;
+  const uploadFiles = async (selectedQuestionFiles: File[], selectedAnswerFiles: File[]) => {
+    if (selectedQuestionFiles.length === 0 || selectedAnswerFiles.length === 0) return;
     
     setIsUploading(true);
     setError(null);
@@ -68,8 +79,15 @@ export function useExamPolling() {
     setTaskId(null);
     
     const formData = new FormData();
-    selectedFiles.forEach(file => {
-      formData.append('files', file);
+    
+    // Add question images
+    selectedQuestionFiles.forEach(file => {
+      formData.append('question_images', file);
+    });
+    
+    // Add answer images
+    selectedAnswerFiles.forEach(file => {
+      formData.append('answer_images', file);
     });
 
     try {
@@ -97,12 +115,17 @@ export function useExamPolling() {
     }
   };
 
-  const handleFilesChange = (newFiles: File[]) => {
-    setFiles(newFiles);
+  const handleQuestionFilesChange = (newFiles: File[]) => {
+    setQuestionFiles(newFiles);
+  };
+
+  const handleAnswerFilesChange = (newFiles: File[]) => {
+    setAnswerFiles(newFiles);
   };
   
   const reset = () => {
-    setFiles([]);
+    setQuestionFiles([]);
+    setAnswerFiles([]);
     setIsUploading(false);
     setTaskId(null);
     setStatusResponse(null);
@@ -113,12 +136,15 @@ export function useExamPolling() {
   };
 
   return {
-    files,
-    handleFilesChange,
+    questionFiles,
+    answerFiles,
+    handleQuestionFilesChange,
+    handleAnswerFilesChange,
     uploadFiles,
     isUploading,
     statusResponse,
     error,
-    reset
+    reset,
+    setOnCompletionCallback  // 新增：设置完成回调的函数
   };
 }
