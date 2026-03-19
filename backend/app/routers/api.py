@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional, Union
 from pydantic import BaseModel
@@ -59,6 +59,14 @@ class ProblemSchema(BaseModel):
     class Config:
         from_attributes = True
 
+
+class PaginatedProblemsResponse(BaseModel):
+    items: List[ProblemSchema]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
 class KnowledgePointSchema(BaseModel):
     id: int
     name: str
@@ -100,6 +108,59 @@ def get_problems(
         problems.append(problem)
         
     return problems
+
+
+@router.get("/problems/wrong", response_model=PaginatedProblemsResponse)
+def get_wrong_problems(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    mastery: Optional[int] = None,
+    recent_days: Optional[int] = Query(default=None, ge=1, le=365),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get paginated wrong-answer notebook problems.
+
+    Returns a standardized payload with pagination metadata for frontend pagination UI.
+    """
+    from datetime import timedelta
+    from sqlalchemy import or_
+
+    base_query = db.query(Problem, LearningRecord).outerjoin(
+        LearningRecord,
+        (Problem.id == LearningRecord.problem_id) & (LearningRecord.user_id == current_user.id)
+    ).filter(
+        Problem.user_id == current_user.id,
+        or_(LearningRecord.id == None, LearningRecord.status != "correct")
+    )
+
+    if mastery is not None:
+        base_query = base_query.filter(LearningRecord.mastery_level == mastery)
+
+    if recent_days is not None:
+        cutoff = datetime.utcnow() - timedelta(days=recent_days)
+        base_query = base_query.filter(LearningRecord.last_reviewed_at != None).filter(LearningRecord.last_reviewed_at >= cutoff)
+
+    total_count = base_query.count()
+    skip = (page - 1) * page_size
+
+    results = base_query.order_by(Problem.created_at.desc()).offset(skip).limit(page_size).all()
+
+    problems: List[Problem] = []
+    for problem, record in results:
+        problem.current_mastery_level = record.mastery_level if record else None
+        problems.append(problem)
+
+    total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
+
+    return {
+        "items": problems,
+        "total": total_count,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages
+    }
 
 @router.get("/problems/{problem_id}", response_model=ProblemSchema)
 def get_problem(problem_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
