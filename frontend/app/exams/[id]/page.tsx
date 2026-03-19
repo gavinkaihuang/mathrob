@@ -1,15 +1,13 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { fetchWithAuth } from '@/utils/api';
+import { fetchWithAuth, resolveImageUrl } from '@/utils/api';
 import { LatexRenderer } from '@/components/LatexRenderer';
 import { MarkdownRenderer } from '@/components/MarkdownRenderer';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import clsx from 'clsx';
 import { twMerge } from 'tailwind-merge';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 // 试卷类型徽章配置
 const EXAM_TYPE_CONFIG = {
@@ -182,7 +180,7 @@ export default function ExamDetailPage() {
             <h2 className="text-lg font-semibold text-slate-800 mb-4">原卷与答题照片</h2>
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
               {exam.image_urls.map((url, idx) => {
-                const src = url && url.startsWith('http') ? url : `${API_URL}${url}`;
+                const src = resolveImageUrl(url);
                 return (
                   <button
                     key={idx}

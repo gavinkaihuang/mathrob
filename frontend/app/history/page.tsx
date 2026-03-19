@@ -16,7 +16,7 @@ interface Problem {
     knowledge_points?: string[]; // The API might return it here depending on previous logic, but schema says ai_analysis
 }
 
-import { fetchWithAuth } from '../../utils/api';
+import { fetchWithAuth, resolveImageUrl } from '../../utils/api';
 
 // ... class Problem ...
 
@@ -170,7 +170,7 @@ export default function HistoryPage() {
                                             {problem.current_mastery_level === 1 && <span className="text-2xl drop-shadow-sm">🔴</span>}
                                         </div>
                                         <img
-                                            src={`${process.env.NEXT_PUBLIC_API_URL || ''}/static/${problem.image_path.split('/').pop()}`}
+                                            src={resolveImageUrl(problem.image_path)}
                                             alt={`Problem ${problem.id}`}
                                             className="w-full h-full object-contain group-hover:scale-105 transition-transform duration-300"
                                             loading="lazy"

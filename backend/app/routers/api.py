@@ -11,7 +11,7 @@ import asyncio
 from difflib import SequenceMatcher
 from datetime import datetime
 from ..services.ai_service import AIService, AIServiceException
-from ..services.upload_service import save_upload_file
+from ..services.upload_service import upload_to_s3, delete_uploaded_object, get_accessible_image_url
 from ..auth_deps import get_current_user
 import PIL.Image
 
@@ -21,6 +21,13 @@ if not os.path.exists(UPLOAD_DIR):
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
 ai_service = AIService()
+
+
+def _hydrate_problem_images(problem: Problem):
+    problem.image_path = get_accessible_image_url(problem.image_path)
+    if getattr(problem, "solution_attempts", None):
+        for attempt in problem.solution_attempts:
+            attempt.image_path = get_accessible_image_url(attempt.image_path)
 
 class SolutionAttemptSchema(BaseModel):
     id: int
@@ -107,6 +114,7 @@ def get_problems(
             problem.current_mastery_level = record.mastery_level
         else:
             problem.current_mastery_level = None
+        problem.image_path = get_accessible_image_url(problem.image_path)
         problems.append(problem)
         
     return problems
@@ -152,6 +160,7 @@ def get_wrong_problems(
     problems: List[Problem] = []
     for problem, record in results:
         problem.current_mastery_level = record.mastery_level if record else None
+        problem.image_path = get_accessible_image_url(problem.image_path)
         problems.append(problem)
 
     total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
@@ -177,6 +186,8 @@ def get_problem(problem_id: int, db: Session = Depends(get_db), current_user: Us
     ).first()
     if record:
         problem.current_mastery_level = record.mastery_level
+
+    _hydrate_problem_images(problem)
         
     return problem
 
@@ -637,13 +648,7 @@ async def submit_practice_solution(
     if not practice:
         raise HTTPException(status_code=404, detail="Practice problem not found")
         
-    # Save file
-    safe_filename = f"practice_{problem_id}_{int(datetime.utcnow().timestamp())}_{file.filename}"
-    file_location = os.path.join(UPLOAD_DIR, safe_filename)
-    
-    with open(file_location, "wb") as buffer:
-        content = await file.read()
-        buffer.write(content)
+    saved_upload = upload_to_s3(file, prefix="practice-solutions")
         
     # Extract AI reference answer
     problem_latex = practice.latex_content or "N/A"
@@ -661,7 +666,7 @@ async def submit_practice_solution(
             
     # Call AI Teaching Model to analyze the handwritten solution vs reference
     try:
-        feedback_data = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id, user_id=current_user.id)
+        feedback_data = await ai_service.analyze_solution(problem_latex, standard_solution, saved_upload.s3_uri, target_id=problem_id, user_id=current_user.id)
         feedback = feedback_data["feedback_json"]
     except AIServiceException as e:
         status_code = 429 if e.error_type == "rate_limit" else 401 if e.error_type == "auth_error" else 503
@@ -687,13 +692,7 @@ async def submit_solution(
     if not problem:
         raise HTTPException(status_code=404, detail="Problem not found")
         
-    # Save file
-    safe_filename = f"solution_{problem_id}_{int(datetime.utcnow().timestamp())}_{file.filename}"
-    file_location = os.path.join(UPLOAD_DIR, safe_filename)
-    
-    with open(file_location, "wb") as buffer:
-        content = await file.read()
-        buffer.write(content)
+    saved_upload = upload_to_s3(file, prefix="solutions")
         
     # Prepare context for AI
     problem_latex = problem.latex_content or "N/A"
@@ -709,7 +708,7 @@ async def submit_solution(
             
     # Call AI
     try:
-        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id, user_id=current_user.id)
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, saved_upload.s3_uri, target_id=problem_id, user_id=current_user.id)
         feedback = ai_response["feedback_json"]
         used_model = ai_response["ai_model"]
     except AIServiceException as e:
@@ -727,7 +726,7 @@ async def submit_solution(
     attempt = SolutionAttempt(
         problem_id=problem_id,
         user_id=current_user.id,
-        image_path=safe_filename,
+        image_path=saved_upload.public_url,
         ai_model_used=used_model,
         ai_score=feedback.get("score") if isinstance(feedback, dict) else None,
         ai_evaluation=feedback,
@@ -736,6 +735,7 @@ async def submit_solution(
     db.add(attempt)
     db.commit()
     db.refresh(attempt)
+    attempt.image_path = get_accessible_image_url(attempt.image_path)
     
     return attempt
 
@@ -753,13 +753,7 @@ async def submit_homework(
     if not problem:
         raise HTTPException(status_code=404, detail="Problem not found")
         
-    # Save file
-    safe_filename = f"homework_{problem_id}_{int(datetime.utcnow().timestamp())}_{file.filename}"
-    file_location = os.path.join(UPLOAD_DIR, safe_filename)
-    
-    with open(file_location, "wb") as buffer:
-        content = await file.read()
-        buffer.write(content)
+    saved_upload = upload_to_s3(file, prefix="homework")
         
     # Prepare context for AI
     problem_latex = problem.latex_content or "N/A"
@@ -773,7 +767,7 @@ async def submit_homework(
             
     # Call AI
     try:
-        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id, user_id=current_user.id)
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, saved_upload.s3_uri, target_id=problem_id, user_id=current_user.id)
         feedback = ai_response["feedback_json"]
         used_model = ai_response["ai_model"]
     except AIServiceException as e:
@@ -791,7 +785,7 @@ async def submit_homework(
     attempt = SolutionAttempt(
         problem_id=problem_id,
         user_id=current_user.id,
-        image_path=safe_filename,
+        image_path=saved_upload.public_url,
         ai_model_used=used_model,
         ai_score=feedback.get("score") if isinstance(feedback, dict) else None,
         ai_evaluation=feedback,
@@ -801,6 +795,7 @@ async def submit_homework(
     db.add(attempt)
     db.commit()
     db.refresh(attempt)
+    attempt.image_path = get_accessible_image_url(attempt.image_path)
     
     # Process knowledge mastery if exist
     if isinstance(feedback, dict) and "knowledge_analysis" in feedback:
@@ -907,7 +902,7 @@ async def _extract_exam_structure(answer_image_paths: List[str], question_image_
     # Add answer images first (with inline text labels)
     for i, img_path in enumerate(answer_image_paths):
         try:
-            img = PIL.Image.open(img_path)
+            img = ai_service._open_image_for_model(img_path)
             content.append(img)
         except Exception as e:
             print(f"Warning: failed to open answer image {img_path}: {e}")
@@ -915,7 +910,7 @@ async def _extract_exam_structure(answer_image_paths: List[str], question_image_
     # Add question images second (with inline text labels)
     for i, img_path in enumerate(question_image_paths):
         try:
-            img = PIL.Image.open(img_path)
+            img = ai_service._open_image_for_model(img_path)
             content.append(img)
         except Exception as e:
             print(f"Warning: failed to open question image {img_path}: {e}")
@@ -1035,7 +1030,7 @@ async def _grade_exam_batch(
     # Add answer images first (authoritative source)
     for img_path in answer_image_paths:
         try:
-            img = PIL.Image.open(img_path)
+            img = ai_service._open_image_for_model(img_path)
             content.append(img)
         except Exception as e:
             print(f"Warning: failed to open answer image {img_path}: {e}")
@@ -1043,7 +1038,7 @@ async def _grade_exam_batch(
     # Add question images second (context only)
     for img_path in question_image_paths:
         try:
-            img = PIL.Image.open(img_path)
+            img = ai_service._open_image_for_model(img_path)
             content.append(img)
         except Exception as e:
             print(f"Warning: failed to open question image {img_path}: {e}")
@@ -1723,15 +1718,15 @@ async def upload_and_grade_exam(
         
         # Save question images
         for file in question_images:
-            saved_upload = save_upload_file(file)
-            question_image_paths.append(saved_upload.file_system_path)
-            all_image_urls.append(saved_upload.public_path)
+            saved_upload = upload_to_s3(file, prefix="exams")
+            question_image_paths.append(saved_upload.s3_uri)
+            all_image_urls.append(saved_upload.public_url)
 
         # Save answer images
         for file in answer_images:
-            saved_upload = save_upload_file(file)
-            answer_image_paths.append(saved_upload.file_system_path)
-            all_image_urls.append(saved_upload.public_path)
+            saved_upload = upload_to_s3(file, prefix="exams")
+            answer_image_paths.append(saved_upload.s3_uri)
+            all_image_urls.append(saved_upload.public_url)
     
     elif exam_mode == 'combined':
         # ============================================================
@@ -1740,9 +1735,9 @@ async def upload_and_grade_exam(
         
         # Save combined mode images
         for file in combined_images:
-            saved_upload = save_upload_file(file)
-            combined_image_paths.append(saved_upload.file_system_path)
-            all_image_urls.append(saved_upload.public_path)
+            saved_upload = upload_to_s3(file, prefix="exams")
+            combined_image_paths.append(saved_upload.s3_uri)
+            all_image_urls.append(saved_upload.public_url)
         
         # For combined mode, treat combined images as both question and answer
         question_image_paths = combined_image_paths
@@ -1895,7 +1890,7 @@ def get_exam_status(task_id: int, db: Session = Depends(get_db), current_user: U
         "status": exam.status,
         "total_score": exam.total_score,
         "overall_evaluation": exam.overall_evaluation,
-        "image_urls": exam.image_urls or [],
+        "image_urls": [get_accessible_image_url(url) for url in (exam.image_urls or [])],
         "created_at": exam.created_at,
         "results": []
     }
@@ -1952,7 +1947,7 @@ def exam_detail(exam_id: int, db: Session = Depends(get_db), current_user: User 
         'total_score': exam.total_score,
         'status': exam.status,
         'overall_feedback': exam.overall_feedback or exam.overall_evaluation,
-        'image_urls': exam.image_urls or [],
+        'image_urls': [get_accessible_image_url(url) for url in (exam.image_urls or [])],
         'results': [
             {
                 'problem_number': r.problem_number,
@@ -1975,10 +1970,7 @@ async def delete_solution_attempt(attempt_id: int, db: Session = Depends(get_db)
     # Optional: Delete file from disk
     try:
         if attempt.image_path:
-            # Check if it's a relative path from UPLOAD_DIR
-            file_path = os.path.join(UPLOAD_DIR, attempt.image_path)
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            delete_uploaded_object(attempt.image_path)
     except Exception as e:
         print(f"Failed to delete file: {e}")
 
@@ -1997,8 +1989,16 @@ async def reanalyze_solution_attempt(attempt_id: int, db: Session = Depends(get_
     if not problem:
         raise HTTPException(status_code=404, detail="Problem not found")
 
-    file_location = os.path.join(UPLOAD_DIR, attempt.image_path)
-    if not os.path.exists(file_location):
+    file_location = attempt.image_path
+    if file_location and not (
+        file_location.startswith("s3://")
+        or file_location.startswith("http://")
+        or file_location.startswith("https://")
+        or os.path.isabs(file_location)
+    ):
+        file_location = os.path.join(UPLOAD_DIR, file_location)
+
+    if not file_location:
         raise HTTPException(status_code=404, detail="Original image file not found on server")
 
     # Prepare context for AI
@@ -2034,6 +2034,7 @@ async def reanalyze_solution_attempt(attempt_id: int, db: Session = Depends(get_
     attempt.ai_evaluation = feedback
     db.commit()
     db.refresh(attempt)
+    attempt.image_path = get_accessible_image_url(attempt.image_path)
     
     return attempt
 
@@ -2715,18 +2716,14 @@ async def submit_full_paper(
         raise HTTPException(status_code=400, detail="该会话没有试卷快照，请先调用 generate_paper")
 
     # 1. Save uploaded images
-    upload_dir = f"uploads/assessments/{session_id}"
-    os.makedirs(upload_dir, exist_ok=True)
-
     image_paths = []
+    paper_image_urls = []
     for i, file in enumerate(files):
-        if not file.content_type.startswith("image/"):
+        if not file.content_type or not file.content_type.startswith("image/"):
             continue
-        suffix = os.path.splitext(file.filename)[1] or ".jpg"
-        save_path = os.path.join(upload_dir, f"answer_{i+1}{suffix}")
-        with open(save_path, "wb") as f:
-            f.write(await file.read())
-        image_paths.append(save_path)
+        saved_upload = upload_to_s3(file, prefix=f"assessments/{session_id}")
+        image_paths.append(saved_upload.s3_uri)
+        paper_image_urls.append(saved_upload.public_url)
 
     if not image_paths:
         raise HTTPException(status_code=400, detail="请至少上传一张答卷图片")
@@ -2756,7 +2753,7 @@ async def submit_full_paper(
     session.graded_problems = graded
     session.report_markdown = grading_result.get("comprehensive_report", "")
     session.formatting_feedback = grading_result.get("formatting_feedback", "")
-    session.paper_image_paths = image_paths
+    session.paper_image_paths = paper_image_urls
     session.overall_score = overall_pct
     session.status = "completed"
     session.completed_at = dt.utcnow()
@@ -3013,9 +3010,6 @@ async def submit_assessment_problem(
     current_user: User = Depends(get_current_user)
 ):
     from ..models import AssessmentSession, AssessmentProblem, Problem
-    import shutil
-    import uuid
-    import time
     
     # Verify session and problem
     session = db.query(AssessmentSession).filter(
@@ -3037,14 +3031,7 @@ async def submit_assessment_problem(
         
     problem = db.query(Problem).filter(Problem.id == problem_id).first()
         
-    # Save Image
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    file_ext = os.path.splitext(file.filename)[1]
-    filename = f"assess_{session_id}_{problem_id}_{uuid.uuid4().hex[:8]}_{int(time.time())}{file_ext}"
-    file_location = os.path.join(UPLOAD_DIR, filename)
-
-    with open(file_location, "wb+") as file_object:
-        shutil.copyfileobj(file.file, file_object)
+    saved_upload = upload_to_s3(file, prefix=f"assessments/{session_id}/problems/{problem_id}")
         
     # Get Standard Solution for AI compare
     problem_latex = problem.latex_content or "N/A"
@@ -3057,7 +3044,7 @@ async def submit_assessment_problem(
 
     # Call AI Grader
     try:
-        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem.id, user_id=current_user.id)
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, saved_upload.s3_uri, target_id=problem.id, user_id=current_user.id)
         feedback = ai_response["feedback_json"]
         score = feedback.get("score", 0)
     except AIServiceException as e:
@@ -3071,7 +3058,7 @@ async def submit_assessment_problem(
         score = 0
         
     # Update DB
-    ap.image_path = filename
+    ap.image_path = saved_upload.public_url
     ap.ai_score = float(score)
     ap.ai_feedback = feedback
     ap.is_submitted = True

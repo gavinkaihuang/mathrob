@@ -1,11 +1,10 @@
 "use client";
 
 import React, { useEffect, useState } from 'react';
-import { fetchWithAuth } from '@/utils/api';
+import { fetchWithAuth, resolveImageUrl } from '@/utils/api';
 import { LatexRenderer } from '@/components/LatexRenderer';
 import { MarkdownRenderer } from '@/components/MarkdownRenderer';
 import clsx from 'clsx';
-const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 import Link from 'next/link';
 
 interface ExamSummary {
@@ -172,7 +171,7 @@ export default function ExamHistoryPage() {
                   <h4 className="text-sm font-semibold text-slate-700 mb-2">原卷与答题照片</h4>
                   <div className="flex gap-3 overflow-x-auto py-2">
                     {selected.image_urls.map((u, idx) => {
-                      const src = u && u.startsWith('http') ? u : `${API_URL}${u}`;
+                      const src = resolveImageUrl(u);
                       return (
                         <button key={u} onClick={() => setLightboxSrc(src)} className="shrink-0">
                           <img src={src} alt={`img-${idx}`} className="w-36 h-24 object-cover rounded-md border" />

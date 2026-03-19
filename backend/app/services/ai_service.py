@@ -1,6 +1,7 @@
 import os
 import google.generativeai as genai
 import PIL.Image
+import httpx
 from dotenv import load_dotenv
 import json
 import re
@@ -8,6 +9,7 @@ import glob
 from google.api_core import exceptions as google_exceptions
 from datetime import datetime
 import time
+from io import BytesIO
 
 load_dotenv()
 
@@ -17,6 +19,7 @@ import traceback
 from ..database import SessionLocal
 from ..models import SystemLog, APICallLog, OperationLog
 from .token_manager import token_manager
+from .upload_service import read_s3_object_bytes
 
 class AIAnalysisResponse(BaseModel):
     latex_content: str
@@ -35,6 +38,27 @@ class AIService:
     def __init__(self):
         # Global genai token configure removed. Managed dynamically per-request.
         pass
+
+    def _open_image_for_model(self, image_ref: str):
+        if not image_ref:
+            raise ValueError("image_ref is empty")
+
+        if image_ref.startswith("s3://"):
+            binary = read_s3_object_bytes(image_ref)
+            image = PIL.Image.open(BytesIO(binary))
+            image.load()
+            return image
+
+        if image_ref.startswith("http://") or image_ref.startswith("https://"):
+            response = httpx.get(image_ref, timeout=30.0)
+            response.raise_for_status()
+            image = PIL.Image.open(BytesIO(response.content))
+            image.load()
+            return image
+
+        image = PIL.Image.open(image_ref)
+        image.load()
+        return image
 
     def _log_system_error(self, category: str, message: str, details: Any = None):
         try:
@@ -142,13 +166,13 @@ class AIService:
                     if image_paths:
                         for ip in image_paths:
                             try:
-                                img = PIL.Image.open(ip)
+                                img = self._open_image_for_model(ip)
                                 content.append(img)
                             except Exception as e:
                                 print(f"Warning: failed to open image {ip}: {e}")
                     elif image_path:
                         try:
-                            img = PIL.Image.open(image_path)
+                            img = self._open_image_for_model(image_path)
                             content.append(img)
                         except Exception as e:
                             print(f"Warning: failed to open image {image_path}: {e}")
