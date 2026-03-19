@@ -74,6 +74,7 @@ export default function ExamHistoryPage() {
   const [selected, setSelected] = useState<ExamDetail | null>(null);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const activeExamId = selected?.id ?? null;
 
   useEffect(() => {
     const load = async () => {
@@ -108,34 +109,48 @@ export default function ExamHistoryPage() {
           <div className="space-y-4">
             {loading && <div>加载中...</div>}
             {!loading && exams.length === 0 && <div className="text-sm text-gray-500">暂无记录</div>}
-            {exams.map(ex => (
-              <div key={ex.id} className="bg-white p-4 rounded-xl border cursor-pointer hover:shadow transition-shadow" onClick={() => openDetail(ex.id)}>
+            {exams.map((exam) => {
+              const isActive = exam.id === activeExamId;
+              return (
+              <div
+                key={exam.id}
+                className={clsx(
+                  'rounded-xl border p-4 cursor-pointer transition-all duration-200 relative',
+                  isActive
+                    ? 'bg-indigo-50/50 border-indigo-500 ring-1 ring-indigo-500 shadow-md'
+                    : 'bg-white border-slate-200 hover:border-indigo-300 hover:shadow-sm'
+                )}
+                onClick={() => openDetail(exam.id)}
+              >
+                {isActive && (
+                  <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-indigo-600 rounded-r-md" />
+                )}
                 <div className="flex justify-between items-start mb-3">
                   <div className="flex-1">
-                    <div className="text-xs text-gray-400 mb-2">{new Date(ex.created_at).toLocaleString()}</div>
-                    <div className="font-bold text-slate-800 mb-2">{ex.paper_name}</div>
-                    {ex.exam_type && (
+                    <div className="text-xs text-gray-400 mb-2">{new Date(exam.created_at).toLocaleString()}</div>
+                    <div className="font-bold text-slate-800 mb-2">{exam.paper_name}</div>
+                    {exam.exam_type && (
                       <div
                         className={clsx(
                           'inline-block px-2 py-1 rounded text-xs font-medium',
-                          EXAM_TYPE_CONFIG[ex.exam_type].bgColor,
-                          EXAM_TYPE_CONFIG[ex.exam_type].textColor
+                          EXAM_TYPE_CONFIG[exam.exam_type].bgColor,
+                          EXAM_TYPE_CONFIG[exam.exam_type].textColor
                         )}
                       >
-                        {EXAM_TYPE_CONFIG[ex.exam_type].label}
+                        {EXAM_TYPE_CONFIG[exam.exam_type].label}
                       </div>
                     )}
                   </div>
                   <div className="text-right">
-                    <div className="text-lg font-black text-indigo-600">{ex.total_score ?? 'N/A'} 分</div>
-                    <div className="text-xs text-gray-500 mt-1">{ex.ai_model ? '🤖 ' + ex.ai_model : '—'}</div>
+                    <div className="text-lg font-black text-indigo-600">{exam.total_score ?? 'N/A'} 分</div>
+                    <div className="text-xs text-gray-500 mt-1">{exam.ai_model ? '🤖 ' + exam.ai_model : '—'}</div>
                   </div>
                 </div>
                 <div className="flex items-center justify-end">
-                  <Link href="#" onClick={(e) => { e.preventDefault(); openDetail(ex.id); }} className="text-xs text-indigo-600 hover:text-indigo-800">查看详情 →</Link>
+                  <Link href="#" onClick={(e) => { e.preventDefault(); openDetail(exam.id); }} className="text-xs text-indigo-600 hover:text-indigo-800">查看详情 →</Link>
                 </div>
               </div>
-            ))}
+            )})}
           </div>
         </div>
 
