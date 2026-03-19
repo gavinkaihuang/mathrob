@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, ForeignKey, Enum as SAEnum, Float, Date, Boolean
+from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, ForeignKey, Enum as SAEnum, Float, Date, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -131,6 +131,23 @@ class DailyReview(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", backref="daily_reviews")
+
+
+class DailyReviewTask(Base):
+    """Daily review task snapshot (generate once per day, read many times)."""
+    __tablename__ = "daily_review_tasks"
+    __table_args__ = (
+        UniqueConstraint("user_id", "task_date", name="uq_daily_review_task_user_date"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    task_date = Column(Date, nullable=False, index=True)
+    problem_ids = Column(JSON, nullable=False)
+    is_completed = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", backref="daily_review_tasks")
 
 class SolutionAttempt(Base):
     __tablename__ = "solution_attempts"
