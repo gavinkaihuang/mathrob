@@ -19,8 +19,10 @@ export default function FullExamUploadPage() {
     uploadFiles,
     isUploading,
     statusResponse,
+    duplicateResponse,
     error,
-    reset
+    reset,
+    setDuplicateResponse
   } = useExamPolling();
   
   const questionFileInputRef = useRef<HTMLInputElement>(null);
@@ -152,15 +154,48 @@ export default function FullExamUploadPage() {
     handleCombinedFilesChange(newFiles);
   };
 
-  const triggerUpload = () => {
+  const triggerUpload = async () => {
     if (examMode === 'separated') {
       if (questionFiles.length > 0 && answerFiles.length > 0) {
-        uploadFiles(questionFiles, answerFiles, 'separated', [], selectedExamType);
+        await uploadFiles(questionFiles, answerFiles, 'separated', [], selectedExamType);
       }
     } else {
       if (combinedFiles.length > 0) {
-        uploadFiles([], [], 'combined', combinedFiles, selectedExamType);
+        await uploadFiles([], [], 'combined', combinedFiles, selectedExamType);
       }
+    }
+  };
+
+  const handleViewHistory = () => {
+    if (!duplicateResponse) return;
+    const examId = duplicateResponse.existing_exam_id;
+    reset();
+    router.push(`/exams/${examId}`);
+  };
+
+  const handleForceRegrade = async () => {
+    if (!duplicateResponse) return;
+    const existingExamId = duplicateResponse.existing_exam_id;
+    setDuplicateResponse(null);
+
+    if (examMode === 'separated') {
+      await uploadFiles(
+        questionFiles,
+        answerFiles,
+        'separated',
+        [],
+        selectedExamType,
+        { forceRegrade: true, existingExamId }
+      );
+    } else {
+      await uploadFiles(
+        [],
+        [],
+        'combined',
+        combinedFiles,
+        selectedExamType,
+        { forceRegrade: true, existingExamId }
+      );
     }
   };
 
@@ -608,6 +643,32 @@ export default function FullExamUploadPage() {
             <span className="font-semibold">💡 提示：</span> 请确保照片清晰、光线充足，以便 AI 准确识别题目文字和学生作答
           </p>
         </div>
+
+        {duplicateResponse && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 px-4">
+            <div className="w-full max-w-md rounded-2xl bg-white border border-slate-200 shadow-2xl p-6">
+              <h3 className="text-lg font-bold text-slate-900 mb-2">检测到重复试卷</h3>
+              <p className="text-sm text-slate-600 leading-6 mb-5">
+                系统检测到您已上传过《{duplicateResponse.title}》。您可以：
+              </p>
+
+              <div className="flex flex-col sm:flex-row gap-3">
+                <button
+                  onClick={handleViewHistory}
+                  className="flex-1 px-4 py-2.5 rounded-lg border border-slate-300 text-slate-700 bg-white hover:bg-slate-50 font-medium"
+                >
+                  查看历史批阅
+                </button>
+                <button
+                  onClick={handleForceRegrade}
+                  className="flex-1 px-4 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold"
+                >
+                  强制重新批阅
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </main>
   );

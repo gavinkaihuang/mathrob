@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
 from sqlalchemy.orm import Session
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Any
 from pydantic import BaseModel
 from ..database import get_db
 from ..models import Problem, KnowledgePoint, KnowledgeNode, LearningRecord, SolutionAttempt, User, PracticeProblem, PracticeSession, UserProgress, APICallLog, SystemLog, DailyReview
@@ -8,6 +8,7 @@ import os
 import json
 import re
 import asyncio
+from difflib import SequenceMatcher
 from datetime import datetime
 from ..services.ai_service import AIService, AIServiceException
 from ..auth_deps import get_current_user
@@ -1148,13 +1149,60 @@ def _natural_sort_key(problem: dict) -> tuple:
         return (0, hash(num_str))
 
 
+def _normalize_paper_title(title: Optional[str]) -> str:
+    if not title:
+        return ""
+    normalized = title.strip().lower()
+    normalized = re.sub(r'\s+', '', normalized)
+    normalized = re.sub(r'[\-—_·•,，。:：;；!！?？"“”\'‘’()（）\[\]{}<>《》]', '', normalized)
+    return normalized
+
+
+def _is_similar_paper_title(title_a: Optional[str], title_b: Optional[str]) -> bool:
+    normalized_a = _normalize_paper_title(title_a)
+    normalized_b = _normalize_paper_title(title_b)
+
+    if not normalized_a or not normalized_b:
+        return False
+
+    if normalized_a == normalized_b:
+        return True
+
+    shorter, longer = (normalized_a, normalized_b) if len(normalized_a) <= len(normalized_b) else (normalized_b, normalized_a)
+    if len(shorter) >= 6 and shorter in longer:
+        return True
+
+    return SequenceMatcher(None, normalized_a, normalized_b).ratio() >= 0.90
+
+
+def _find_duplicate_exam_by_title(db: Session, user_id: int, paper_title: str, exclude_exam_id: Optional[int] = None):
+    from ..models import ExamRecord
+
+    if not paper_title:
+        return None
+
+    query = db.query(ExamRecord).filter(ExamRecord.user_id == user_id)
+    if exclude_exam_id is not None:
+        query = query.filter(ExamRecord.id != exclude_exam_id)
+
+    candidates = query.order_by(ExamRecord.created_at.desc()).limit(200).all()
+    for exam in candidates:
+        if _is_similar_paper_title(paper_title, exam.paper_name or ""):
+            return exam
+
+    return None
+
+
 async def process_full_exam(
     task_id: int, 
     user_id: int, 
     question_image_paths: List[str], 
     answer_image_paths: List[str],
     image_urls: List[str] = None,
-    exam_mode: str = "separated"
+    exam_mode: str = "separated",
+    precomputed_question_numbers: Optional[List[str]] = None,
+    precomputed_paper_title: Optional[str] = None,
+    precomputed_stage1_model: Optional[str] = None
 ):
     """
     Two-Stage Exam Grading Pipeline with Image Separation & Dynamic Model Routing:
@@ -1232,14 +1280,25 @@ async def process_full_exam(
         # Database connection is closed, preventing connection pooling issues
         # ============================================================
         print(f"[Exam {task_id}] Stage 1b: Extracting exam structure from {len(answer_image_paths)} answer images...")
-        
-        structure = await _extract_exam_structure(
-            answer_image_paths=answer_image_paths,
-            question_image_paths=question_image_paths,
-            ai_service=ai_service
-        )
-        question_numbers = structure['question_numbers']
-        paper_title = structure['paper_title']
+
+        if precomputed_question_numbers is not None and precomputed_paper_title is not None:
+            question_numbers = precomputed_question_numbers
+            paper_title = precomputed_paper_title
+            stage1_model_used = precomputed_stage1_model or "precomputed_stage1"
+            structure = {
+                "question_numbers": question_numbers,
+                "paper_title": paper_title,
+                "model": stage1_model_used
+            }
+            print(f"[Exam {task_id}] Stage 1b: Using precomputed structure from upload preflight")
+        else:
+            structure = await _extract_exam_structure(
+                answer_image_paths=answer_image_paths,
+                question_image_paths=question_image_paths,
+                ai_service=ai_service
+            )
+            question_numbers = structure['question_numbers']
+            paper_title = structure['paper_title']
         
         print(f"[Exam {task_id}] Stage 1b Complete: Found {len(question_numbers)} questions: {question_numbers}")
         
@@ -1639,6 +1698,8 @@ async def upload_and_grade_exam(
     background_tasks: BackgroundTasks,
     exam_mode: str = Form('separated'),
     exam_type: str = Form('custom'),
+    force_regrade: bool = Form(False),
+    existing_exam_id: Optional[int] = Form(None),
     question_images: List[UploadFile] = File(default=[]),
     answer_images: List[UploadFile] = File(default=[]),
     combined_images: List[UploadFile] = File(default=[]),
@@ -1646,7 +1707,8 @@ async def upload_and_grade_exam(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    from ..models import ExamRecord
+    from ..models import ExamRecord, ExamProblemResult
+    from ..main import ai_service as main_ai_service
     
     question_image_paths = []
     answer_image_paths = []
@@ -1716,26 +1778,85 @@ async def upload_and_grade_exam(
     else:
         raise ValueError(f"Invalid exam_mode: {exam_mode}")
         
-    # Create Task Record
-    from ..models import ExamType
-    
     # Convert exam_type string to ExamType enum
+    from ..models import ExamType
     try:
         exam_type_enum = ExamType[exam_type.upper()]
     except (KeyError, AttributeError):
         exam_type_enum = ExamType.CUSTOM
-    
-    exam_record = ExamRecord(
+
+    # Stage 1 preflight: extract title/question numbers first, then run duplicate interception.
+    # This avoids launching expensive map-reduce grading when same paper was already graded.
+    try:
+        structure = await _extract_exam_structure(
+            answer_image_paths=answer_image_paths,
+            question_image_paths=question_image_paths,
+            ai_service=main_ai_service
+        )
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"试卷结构识别失败，请重试: {str(e)}")
+
+    extracted_paper_title = (structure.get("paper_title") or paper_name or f"摸底测试_{datetime.utcnow().strftime('%Y%m%d_%H%M')}").strip()
+    extracted_question_numbers = structure.get("question_numbers", [])
+    extracted_stage1_model = structure.get("model", "unknown")
+
+    duplicate_exam = _find_duplicate_exam_by_title(
+        db=db,
         user_id=current_user.id,
-        status="processing",
-        exam_type=exam_type_enum,
-        image_paths=question_image_paths + answer_image_paths,  # Store all paths for reference
-        image_urls=all_image_urls,
-        paper_name=(paper_name or f"摸底测试_{datetime.utcnow().strftime('%Y%m%d_%H%M')}")
+        paper_title=extracted_paper_title
     )
-    db.add(exam_record)
-    db.commit()
-    db.refresh(exam_record)
+
+    if duplicate_exam and not force_regrade:
+        return {
+            "status": "duplicate_found",
+            "existing_exam_id": duplicate_exam.id,
+            "title": duplicate_exam.paper_name or extracted_paper_title
+        }
+
+    exam_record = None
+    target_exam = None
+
+    # Force regrade path: update existing record in place (do not insert a new row)
+    if force_regrade:
+        if existing_exam_id is not None:
+            target_exam = db.query(ExamRecord).filter(
+                ExamRecord.id == existing_exam_id,
+                ExamRecord.user_id == current_user.id
+            ).first()
+            if not target_exam:
+                raise HTTPException(status_code=404, detail="指定的历史试卷不存在")
+        elif duplicate_exam is not None:
+            target_exam = duplicate_exam
+
+    if target_exam:
+        db.query(ExamProblemResult).filter(ExamProblemResult.exam_id == target_exam.id).delete(synchronize_session=False)
+
+        target_exam.status = "processing"
+        target_exam.exam_type = exam_type_enum
+        target_exam.image_paths = question_image_paths + answer_image_paths
+        target_exam.image_urls = all_image_urls
+        target_exam.paper_name = extracted_paper_title
+        target_exam.total_score = None
+        target_exam.overall_feedback = None
+        target_exam.overall_evaluation = None
+        target_exam.ai_model = None
+        target_exam.completed_at = None
+
+        db.commit()
+        db.refresh(target_exam)
+        exam_record = target_exam
+    else:
+        exam_record = ExamRecord(
+            user_id=current_user.id,
+            status="processing",
+            exam_type=exam_type_enum,
+            image_paths=question_image_paths + answer_image_paths,
+            image_urls=all_image_urls,
+            paper_name=extracted_paper_title
+        )
+        db.add(exam_record)
+        db.commit()
+        db.refresh(exam_record)
     
     # Dispatch Async Task with separated image categories
     background_tasks.add_task(
@@ -1745,7 +1866,10 @@ async def upload_and_grade_exam(
         question_image_paths=question_image_paths,
         answer_image_paths=answer_image_paths,
         image_urls=all_image_urls,
-        exam_mode=exam_mode
+        exam_mode=exam_mode,
+        precomputed_question_numbers=extracted_question_numbers,
+        precomputed_paper_title=extracted_paper_title,
+        precomputed_stage1_model=extracted_stage1_model
     )
     
     return {"task_id": exam_record.id, "status": exam_record.status}

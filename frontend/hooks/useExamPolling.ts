@@ -20,13 +20,31 @@ export interface ExamStatusResponse {
   results: ExamProblemResult[];
 }
 
+export interface DuplicateFoundResponse {
+  status: 'duplicate_found';
+  existing_exam_id: number;
+  title: string;
+}
+
+export interface UploadTaskResponse {
+  task_id: number;
+  status: string;
+}
+
 export function useExamPolling() {
+  const getErrorMessage = (value: unknown, fallback: string): string => {
+    if (value instanceof Error && value.message) {
+      return value.message;
+    }
+    return fallback;
+  };
+
   const [questionFiles, setQuestionFiles] = useState<File[]>([]);
   const [answerFiles, setAnswerFiles] = useState<File[]>([]);
   const [combinedFiles, setCombinedFiles] = useState<File[]>([]);
   const [isUploading, setIsUploading] = useState(false);
-  const [taskId, setTaskId] = useState<number | null>(null);
   const [statusResponse, setStatusResponse] = useState<ExamStatusResponse | null>(null);
+  const [duplicateResponse, setDuplicateResponse] = useState<DuplicateFoundResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [onCompletionCallback, setOnCompletionCallback] = useState<((examId: number) => void) | null>(null);
   
@@ -58,9 +76,9 @@ export function useExamPolling() {
           if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
           setIsUploading(false);
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error("Polling error", err);
-        setError(err.message || 'Error checking status');
+        setError(getErrorMessage(err, 'Error checking status'));
         if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
         setIsUploading(false);
       }
@@ -76,7 +94,11 @@ export function useExamPolling() {
     selectedAnswerFiles: File[], 
     examMode: 'separated' | 'combined' = 'separated',
     selectedCombinedFiles: File[] = [],
-    examType: 'custom' | 'diagnostic' | 'midterm' | 'final' = 'custom'
+    examType: 'custom' | 'diagnostic' | 'midterm' | 'final' = 'custom',
+    options?: {
+      forceRegrade?: boolean;
+      existingExamId?: number;
+    }
   ) => {
     if (examMode === 'separated' && (selectedQuestionFiles.length === 0 || selectedAnswerFiles.length === 0)) return;
     if (examMode === 'combined' && selectedCombinedFiles.length === 0) return;
@@ -84,7 +106,7 @@ export function useExamPolling() {
     setIsUploading(true);
     setError(null);
     setStatusResponse(null);
-    setTaskId(null);
+    setDuplicateResponse(null);
     
     const formData = new FormData();
     
@@ -93,6 +115,13 @@ export function useExamPolling() {
     
     // Add exam_type parameter
     formData.append('exam_type', examType);
+
+    if (options?.forceRegrade) {
+      formData.append('force_regrade', 'true');
+    }
+    if (options?.existingExamId !== undefined) {
+      formData.append('existing_exam_id', String(options.existingExamId));
+    }
     
     if (examMode === 'separated') {
       // Add question images
@@ -124,15 +153,24 @@ export function useExamPolling() {
       }
       
       const data = await res.json();
-      setTaskId(data.task_id);
+
+      if (data?.status === 'duplicate_found') {
+        setDuplicateResponse(data as DuplicateFoundResponse);
+        setIsUploading(false);
+        return data as DuplicateFoundResponse;
+      }
+
+      const taskResponse = data as UploadTaskResponse;
       
       // Start polling for this new task
-      startPolling(data.task_id);
+      startPolling(taskResponse.task_id);
+      return taskResponse;
       
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error("Upload error", err);
-      setError(err.message || "Failed to upload files");
+      setError(getErrorMessage(err, "Failed to upload files"));
       setIsUploading(false);
+      return null;
     }
   };
 
@@ -153,8 +191,8 @@ export function useExamPolling() {
     setAnswerFiles([]);
     setCombinedFiles([]);
     setIsUploading(false);
-    setTaskId(null);
     setStatusResponse(null);
+    setDuplicateResponse(null);
     setError(null);
     if (pollingIntervalRef.current) {
       clearInterval(pollingIntervalRef.current);
@@ -171,8 +209,10 @@ export function useExamPolling() {
     uploadFiles,
     isUploading,
     statusResponse,
+    duplicateResponse,
     error,
     reset,
+    setDuplicateResponse,
     setOnCompletionCallback  // 新增：设置完成回调的函数
   };
 }
