@@ -11,6 +11,7 @@ import asyncio
 from difflib import SequenceMatcher
 from datetime import datetime
 from ..services.ai_service import AIService, AIServiceException
+from ..services.upload_service import save_upload_file
 from ..auth_deps import get_current_user
 import PIL.Image
 
@@ -1714,10 +1715,6 @@ async def upload_and_grade_exam(
     answer_image_paths = []
     combined_image_paths = []
     all_image_urls = []
-    
-    # Ensure exams subdir exists
-    exams_dir = os.path.join(UPLOAD_DIR, "exams")
-    os.makedirs(exams_dir, exist_ok=True)
 
     if exam_mode == 'separated':
         # ============================================================
@@ -1726,31 +1723,15 @@ async def upload_and_grade_exam(
         
         # Save question images
         for file in question_images:
-            safe_filename = f"exam_{current_user.id}_{int(datetime.utcnow().timestamp())}_q_{file.filename}"
-            file_location = os.path.join(exams_dir, safe_filename)
-
-            with open(file_location, "wb") as buffer:
-                content = await file.read()
-                buffer.write(content)
-
-            question_image_paths.append(file_location)
-            # Build URL relative to UPLOAD_DIR (which is mounted at /static)
-            rel_path = os.path.relpath(file_location, UPLOAD_DIR).replace('\\', '/')
-            all_image_urls.append(f"/static/{rel_path}")
+            saved_upload = save_upload_file(file)
+            question_image_paths.append(saved_upload.file_system_path)
+            all_image_urls.append(saved_upload.public_path)
 
         # Save answer images
         for file in answer_images:
-            safe_filename = f"exam_{current_user.id}_{int(datetime.utcnow().timestamp())}_a_{file.filename}"
-            file_location = os.path.join(exams_dir, safe_filename)
-
-            with open(file_location, "wb") as buffer:
-                content = await file.read()
-                buffer.write(content)
-
-            answer_image_paths.append(file_location)
-            # Build URL relative to UPLOAD_DIR (which is mounted at /static)
-            rel_path = os.path.relpath(file_location, UPLOAD_DIR).replace('\\', '/')
-            all_image_urls.append(f"/static/{rel_path}")
+            saved_upload = save_upload_file(file)
+            answer_image_paths.append(saved_upload.file_system_path)
+            all_image_urls.append(saved_upload.public_path)
     
     elif exam_mode == 'combined':
         # ============================================================
@@ -1759,17 +1740,9 @@ async def upload_and_grade_exam(
         
         # Save combined mode images
         for file in combined_images:
-            safe_filename = f"exam_{current_user.id}_{int(datetime.utcnow().timestamp())}_c_{file.filename}"
-            file_location = os.path.join(exams_dir, safe_filename)
-
-            with open(file_location, "wb") as buffer:
-                content = await file.read()
-                buffer.write(content)
-
-            combined_image_paths.append(file_location)
-            # Build URL relative to UPLOAD_DIR (which is mounted at /static)
-            rel_path = os.path.relpath(file_location, UPLOAD_DIR).replace('\\', '/')
-            all_image_urls.append(f"/static/{rel_path}")
+            saved_upload = save_upload_file(file)
+            combined_image_paths.append(saved_upload.file_system_path)
+            all_image_urls.append(saved_upload.public_path)
         
         # For combined mode, treat combined images as both question and answer
         question_image_paths = combined_image_paths
