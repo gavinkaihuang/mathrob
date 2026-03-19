@@ -1095,22 +1095,47 @@ async def process_full_exam(
     image_urls: List[str] = None
 ):
     """
-    Two-Stage Exam Grading Pipeline with Image Separation:
+    Two-Stage Exam Grading Pipeline with Image Separation & Dynamic Model Routing:
     Stage 1: Lightweight structure extraction (identify all question numbers from answer images)
     Stage 2: Parallel batch grading (2-3 questions per batch using asyncio.gather)
-    Stage 3: Result aggregation and database persistence
+    Stage 3: Result aggregation, weighted knowledge mastery update, and database persistence
     
-    Key Improvement: Explicitly separates question images from answer images
-    to prevent AI from using question drafts when grading.
+    Key Improvements:
+    - Dynamically routes to appropriate teaching model based on exam_type
+    - Implements weighted moving average for knowledge mastery calculation
+    - Explicitly separates question images from answer images
     """
     from ..database import SessionLocal
-    from ..models import ExamRecord, ExamProblemResult, KnowledgeNode, UserKnowledgeMastery, SystemLog
+    from ..models import ExamRecord, ExamProblemResult, KnowledgeNode, UserKnowledgeMastery, SystemLog, ExamType
     from ..main import ai_service
+    from ..services.model_manager import model_manager
+    from ..services.knowledge_mastery_service import batch_update_knowledge_mastery
     
     db = SessionLocal()
     pipeline_start_time = datetime.utcnow()
+    selected_teaching_model = None  # Will be set based on exam_type
     
     try:
+        # ============================================================
+        # FETCH EXAM RECORD & DETERMINE TEACHING MODEL
+        # ============================================================
+        exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
+        if not exam:
+            raise ValueError(f"Exam record {task_id} not found")
+        
+        exam_type: ExamType = exam.exam_type or ExamType.CUSTOM
+        
+        print(f"[Exam {task_id}] Exam Type: {exam_type.value}")
+        
+        # Get the appropriate teaching model based on exam type
+        try:
+            selected_teaching_model = model_manager.get_teaching_model_for_exam_type(db, exam_type)
+            print(f"[Exam {task_id}] Selected Teaching Model: {selected_teaching_model}")
+        except Exception as e:
+            print(f"[Exam {task_id}] ⚠️ Failed to fetch exam_type-specific model: {e}")
+            print(f"[Exam {task_id}] Falling back to default AI service model")
+            selected_teaching_model = None  # Will use default ai_service model
+        
         # Get standard knowledge tags
         nodes = db.query(KnowledgeNode).all()
         standard_tags_list = [n.name for n in nodes]
@@ -1256,6 +1281,12 @@ async def process_full_exam(
         exam.status = "completed"
         exam.completed_at = datetime.utcnow()
         
+        # Persist the actual teaching model used in this exam
+        if selected_teaching_model:
+            exam.ai_model = selected_teaching_model
+        else:
+            exam.ai_model = batch_models[0] if batch_models else "unknown"
+        
         # Save all problems to database
         problem_save_count = 0
         for p in all_problems:
@@ -1279,30 +1310,23 @@ async def process_full_exam(
             )
             db.add(prob_res)
             problem_save_count += 1
-            
-            # Update User Knowledge Mastery
-            if max_score > 0 and tag in standard_tags_list:
-                mastery_ratio = score / max_score
-                ai_rating = round(mastery_ratio * 10, 1)
-                
-                mastery_record = db.query(UserKnowledgeMastery).filter(
-                    UserKnowledgeMastery.user_id == user_id,
-                    UserKnowledgeMastery.knowledge_tag == tag
-                ).first()
-                
-                if mastery_record:
-                    old_rating = mastery_record.ai_assessed_rating or 5.0
-                    mastery_record.ai_assessed_rating = round(old_rating * 0.4 + ai_rating * 0.6, 1)
-                    self_r = mastery_record.user_self_rating or 5.0
-                    mastery_record.comprehensive_score = round(mastery_record.ai_assessed_rating * 0.6 + self_r * 0.4, 1)
-                else:
-                    new_mastery = UserKnowledgeMastery(
-                        user_id=user_id,
-                        knowledge_tag=tag,
-                        ai_assessed_rating=ai_rating,
-                        comprehensive_score=ai_rating
-                    )
-                    db.add(new_mastery)
+        
+        # Flush problem results first
+        db.flush()
+        
+        # Batch update knowledge mastery using weighted algorithm
+        print(f"[Exam {task_id}] Stage 3: Updating knowledge mastery with weighted algorithm...")
+        mastery_update_summary = batch_update_knowledge_mastery(
+            db=db,
+            user_id=user_id,
+            problems=all_problems,
+            exam_type=exam_type,
+            standard_tags_list=standard_tags_list
+        )
+        
+        print(f"[Exam {task_id}] Knowledge mastery updated: {mastery_update_summary['updated_mastery_count']} records")
+        if mastery_update_summary['skipped']:
+            print(f"[Exam {task_id}] Skipped knowledge points: {mastery_update_summary['skipped']}")
         
         db.commit()
         
@@ -1312,10 +1336,13 @@ async def process_full_exam(
         log_s3 = SystemLog(
             level="INFO",
             category="teaching",
-            message=f"Exam {task_id} completed via two-stage pipeline",
+            message=f"Exam {task_id} completed via two-stage pipeline with weighted knowledge mastery",
             details={
                 "stage": 3,
+                "exam_type": exam_type.value,
+                "teaching_model": selected_teaching_model or "default",
                 "problems_saved": problem_save_count,
+                "mastery_updated": mastery_update_summary['updated_mastery_count'],
                 "total_score": total_score,
                 "pipeline_duration_seconds": pipeline_duration,
                 "questions_expected": len(question_numbers),
@@ -1326,7 +1353,7 @@ async def process_full_exam(
         db.add(log_s3)
         db.commit()
         
-        print(f"[Exam {task_id}] ✅ Pipeline completed in {pipeline_duration:.1f}s: {problem_save_count} problems saved")
+        print(f"[Exam {task_id}] ✅ Pipeline completed in {pipeline_duration:.1f}s: {problem_save_count} problems saved, {mastery_update_summary['updated_mastery_count']} mastery records updated")
         
     except Exception as e:
         print(f"[Exam {task_id}] ❌ Pipeline failed: {e}")
@@ -1359,6 +1386,7 @@ async def process_full_exam(
 async def upload_and_grade_exam(
     background_tasks: BackgroundTasks,
     exam_mode: str = Form('separated'),
+    exam_type: str = Form('custom'),
     question_images: List[UploadFile] = File(default=[]),
     answer_images: List[UploadFile] = File(default=[]),
     combined_images: List[UploadFile] = File(default=[]),
@@ -1437,9 +1465,18 @@ async def upload_and_grade_exam(
         raise ValueError(f"Invalid exam_mode: {exam_mode}")
         
     # Create Task Record
+    from ..models import ExamType
+    
+    # Convert exam_type string to ExamType enum
+    try:
+        exam_type_enum = ExamType[exam_type.upper()]
+    except (KeyError, AttributeError):
+        exam_type_enum = ExamType.CUSTOM
+    
     exam_record = ExamRecord(
         user_id=current_user.id,
         status="processing",
+        exam_type=exam_type_enum,
         image_paths=question_image_paths + answer_image_paths,  # Store all paths for reference
         image_urls=all_image_urls,
         paper_name=(paper_name or f"摸底测试_{datetime.utcnow().strftime('%Y%m%d_%H%M')}")
@@ -1471,6 +1508,7 @@ def exams_history(db: Session = Depends(get_db), current_user: User = Depends(ge
             'paper_name': e.paper_name or f'试卷_{e.id}',
             'created_at': e.created_at,
             'ai_model': e.ai_model,
+            'exam_type': e.exam_type.value if e.exam_type else 'custom',
             'total_score': e.total_score,
             'status': e.status
         } for e in exams
@@ -1539,6 +1577,7 @@ def exam_detail(exam_id: int, db: Session = Depends(get_db), current_user: User 
         'paper_name': exam.paper_name,
         'created_at': exam.created_at,
         'ai_model': exam.ai_model,
+        'exam_type': exam.exam_type.value if exam.exam_type else 'custom',
         'total_score': exam.total_score,
         'status': exam.status,
         'overall_feedback': exam.overall_feedback or exam.overall_evaluation,

@@ -11,9 +11,42 @@ import { twMerge } from 'tailwind-merge';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
+// 试卷类型徽章配置
+const EXAM_TYPE_CONFIG = {
+  custom: {
+    label: '📝 日常练习',
+    bgColor: 'bg-slate-100',
+    textColor: 'text-slate-700',
+    borderColor: 'border-slate-200',
+    weight: 1.0
+  },
+  diagnostic: {
+    label: '✨ 摸底定级',
+    bgColor: 'bg-purple-100',
+    textColor: 'text-purple-700',
+    borderColor: 'border-purple-200',
+    weight: 2.0
+  },
+  midterm: {
+    label: '🏆 期中评测',
+    bgColor: 'bg-indigo-100',
+    textColor: 'text-indigo-700',
+    borderColor: 'border-indigo-200',
+    weight: 3.0
+  },
+  final: {
+    label: '👑 期末评测',
+    bgColor: 'bg-rose-100',
+    textColor: 'text-rose-700',
+    borderColor: 'border-rose-200',
+    weight: 3.0
+  }
+};
+
 interface ExamDetail {
   id: number;
   paper_name: string;
+  exam_type?: 'custom' | 'diagnostic' | 'midterm' | 'final';
   created_at: string;
   ai_model?: string;
   total_score?: number;
@@ -101,22 +134,44 @@ export default function ExamDetailPage() {
 
         {/* Header Section */}
         <div className="bg-white rounded-2xl p-6 border mb-6">
-          <div className="flex justify-between items-center mb-4">
-            <h1 className="text-3xl font-bold text-slate-800">{exam.paper_name}</h1>
-            <div className="text-right">
+          <div className="flex justify-between items-start mb-4">
+            <div className="flex-1">
+              <div className="flex items-center gap-3 mb-2">
+                <h1 className="text-3xl font-bold text-slate-800">{exam.paper_name}</h1>
+                {exam.exam_type && (
+                  <div
+                    className={clsx(
+                      'inline-flex items-center px-3 py-1 rounded-full text-xs sm:text-sm font-medium border',
+                      EXAM_TYPE_CONFIG[exam.exam_type].bgColor,
+                      EXAM_TYPE_CONFIG[exam.exam_type].textColor,
+                      EXAM_TYPE_CONFIG[exam.exam_type].borderColor
+                    )}
+                  >
+                    {EXAM_TYPE_CONFIG[exam.exam_type].label}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="text-right ml-4">
               <div className="text-2xl font-black text-indigo-600">{exam.total_score ?? 'N/A'} 分</div>
               <div className="text-sm text-gray-500">{new Date(exam.created_at).toLocaleString()}</div>
             </div>
           </div>
 
-          <div className="flex gap-6 text-sm text-gray-600">
-            <div>
-              <span className="font-semibold">AI 模型:</span>
-              <span className="ml-2">{exam.ai_model || '—'}</span>
-            </div>
+          <div className="flex flex-col gap-3 text-sm border-t pt-4">
+            {/* AI Model Provenance */}
+            {exam.ai_model && (
+              <div className="flex items-center gap-2 text-gray-700">
+                <span className="text-lg">🤖</span>
+                <span className="font-semibold">批阅引擎:</span>
+                <code className="bg-slate-100 px-2.5 py-1 rounded text-slate-700 font-mono text-xs">
+                  {exam.ai_model}
+                </code>
+              </div>
+            )}
             <div>
               <span className="font-semibold">创建时间:</span>
-              <span className="ml-2">{new Date(exam.created_at).toLocaleDateString()}</span>
+              <span className="ml-2 text-gray-600">{new Date(exam.created_at).toLocaleDateString()}</span>
             </div>
           </div>
         </div>
@@ -145,6 +200,28 @@ export default function ExamDetailPage() {
                   </button>
                 );
               })}
+            </div>
+          </div>
+        )}
+
+        {/* Weight Indicator - for weighted exams */}
+        {exam.exam_type && exam.exam_type !== 'custom' && (
+          <div
+            className={clsx(
+              'rounded-2xl p-4 mb-6 border-l-4 flex items-start gap-3',
+              exam.exam_type === 'diagnostic' ? 'bg-purple-50 border-purple-400' : 'bg-amber-50 border-amber-400'
+            )}
+          >
+            <span className="text-2xl">⚖️</span>
+            <div className="flex-1">
+              <div className="font-semibold text-slate-800">
+                {exam.exam_type === 'diagnostic'
+                  ? '本次摸底测验按 2 倍权重计入知识掌握度'
+                  : '本次大考结果按 3 倍权重深度计入知识掌握度'}
+              </div>
+              <div className="text-sm text-slate-700 mt-1">
+                权重系数影响您的长期知识掌握度评估，高权重考试结果将获得更多关注。
+              </div>
             </div>
           </div>
         )}

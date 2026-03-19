@@ -7,6 +7,7 @@ import { useExamPolling } from '@/hooks/useExamPolling';
 export default function FullExamUploader() {
   const router = useRouter();
   const [examMode, setExamMode] = useState<'separated' | 'combined'>('separated');
+  const [selectedExamType, setSelectedExamType] = useState<'custom' | 'diagnostic' | 'midterm' | 'final'>('custom');
   const {
     questionFiles,
     answerFiles,
@@ -154,11 +155,11 @@ export default function FullExamUploader() {
   const triggerUpload = () => {
     if (examMode === 'separated') {
       if (questionFiles.length > 0 && answerFiles.length > 0) {
-        uploadFiles(questionFiles, answerFiles, 'separated');
+        uploadFiles(questionFiles, answerFiles, 'separated', [], selectedExamType);
       }
     } else {
       if (combinedFiles.length > 0) {
-        uploadFiles([], [], 'combined', combinedFiles);
+        uploadFiles([], [], 'combined', combinedFiles, selectedExamType);
       }
     }
   };
@@ -238,6 +239,36 @@ export default function FullExamUploader() {
           发生错误: {error}
         </div>
       )}
+
+      {/* ============================================================ */}
+      {/* Exam Type Selector */}
+      {/* ============================================================ */}
+      <div className="mb-8 p-4 bg-amber-50 rounded-xl border border-amber-200">
+        <p className="text-sm font-semibold text-slate-700 mb-3">选择本次试卷类型：<span className="text-red-600">*</span></p>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {[
+            { value: 'custom' as const, label: '📝 日常练习', desc: '常规作业' },
+            { value: 'diagnostic' as const, label: '✨ 摸底定级', desc: '摸底测试' },
+            { value: 'midterm' as const, label: '🏆 期中评测', desc: '期中考试' },
+            { value: 'final' as const, label: '👑 期末评测', desc: '期末考试' },
+          ].map((type) => (
+            <label key={type.value} className="flex items-start cursor-pointer">
+              <input 
+                type="radio" 
+                name="exam_type" 
+                value={type.value}
+                checked={selectedExamType === type.value}
+                onChange={(e) => setSelectedExamType(type.value)}
+                className="mt-1 w-4 h-4 text-indigo-600 cursor-pointer"
+              />
+              <div className="ml-2">
+                <div className="text-sm font-medium text-slate-700">{type.label}</div>
+                <div className="text-xs text-slate-500">{type.desc}</div>
+              </div>
+            </label>
+          ))}
+        </div>
+      </div>
 
       {/* ============================================================ */}
       {/* Mode Selector - Radio Group */}

@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { fetchWithAuth } from '@/utils/api';
 import { LatexRenderer } from '@/components/LatexRenderer';
 import { MarkdownRenderer } from '@/components/MarkdownRenderer';
+import clsx from 'clsx';
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 import Link from 'next/link';
 
@@ -12,6 +13,7 @@ interface ExamSummary {
   paper_name: string;
   created_at: string;
   ai_model?: string;
+  exam_type?: 'custom' | 'diagnostic' | 'midterm' | 'final';
   total_score?: number;
   status?: string;
 }
@@ -21,6 +23,7 @@ interface ExamDetail {
   paper_name: string;
   created_at: string;
   ai_model?: string;
+  exam_type?: 'custom' | 'diagnostic' | 'midterm' | 'final';
   total_score?: number;
   overall_feedback?: string;
   image_urls?: string[];
@@ -34,6 +37,37 @@ interface ExamDetail {
     feedback?: string;
   }>;
 }
+
+const EXAM_TYPE_CONFIG = {
+  custom: {
+    label: '📝 日常练习',
+    bgColor: 'bg-slate-100',
+    textColor: 'text-slate-700',
+    borderColor: 'border-slate-200',
+    weight: 1.0
+  },
+  diagnostic: {
+    label: '✨ 摸底定级',
+    bgColor: 'bg-purple-100',
+    textColor: 'text-purple-700',
+    borderColor: 'border-purple-200',
+    weight: 2.0
+  },
+  midterm: {
+    label: '🏆 期中评测',
+    bgColor: 'bg-indigo-100',
+    textColor: 'text-indigo-700',
+    borderColor: 'border-indigo-200',
+    weight: 3.0
+  },
+  final: {
+    label: '👑 期末评测',
+    bgColor: 'bg-rose-100',
+    textColor: 'text-rose-700',
+    borderColor: 'border-rose-200',
+    weight: 3.0
+  }
+};
 
 export default function ExamHistoryPage() {
   const [exams, setExams] = useState<ExamSummary[]>([]);
@@ -75,20 +109,30 @@ export default function ExamHistoryPage() {
             {loading && <div>加载中...</div>}
             {!loading && exams.length === 0 && <div className="text-sm text-gray-500">暂无记录</div>}
             {exams.map(ex => (
-              <div key={ex.id} className="bg-white p-4 rounded-xl border cursor-pointer hover:shadow" onClick={() => openDetail(ex.id)}>
-                <div className="flex justify-between items-start">
-                  <div>
-                    <div className="text-sm text-gray-400">{new Date(ex.created_at).toLocaleString()}</div>
-                    <div className="font-bold text-slate-800">{ex.paper_name}</div>
+              <div key={ex.id} className="bg-white p-4 rounded-xl border cursor-pointer hover:shadow transition-shadow" onClick={() => openDetail(ex.id)}>
+                <div className="flex justify-between items-start mb-3">
+                  <div className="flex-1">
+                    <div className="text-xs text-gray-400 mb-2">{new Date(ex.created_at).toLocaleString()}</div>
+                    <div className="font-bold text-slate-800 mb-2">{ex.paper_name}</div>
+                    {ex.exam_type && (
+                      <div
+                        className={clsx(
+                          'inline-block px-2 py-1 rounded text-xs font-medium',
+                          EXAM_TYPE_CONFIG[ex.exam_type].bgColor,
+                          EXAM_TYPE_CONFIG[ex.exam_type].textColor
+                        )}
+                      >
+                        {EXAM_TYPE_CONFIG[ex.exam_type].label}
+                      </div>
+                    )}
                   </div>
                   <div className="text-right">
-                    <div className="text-sm text-indigo-600 font-semibold">{ex.ai_model || '—'}</div>
-                    <div className="text-xs text-gray-500">{ex.status}</div>
+                    <div className="text-lg font-black text-indigo-600">{ex.total_score ?? 'N/A'} 分</div>
+                    <div className="text-xs text-gray-500 mt-1">{ex.ai_model ? '🤖 ' + ex.ai_model : '—'}</div>
                   </div>
                 </div>
-                <div className="mt-3 flex items-center justify-between">
-                  <div className="text-sm text-slate-700">分数: {ex.total_score ?? 'N/A'}</div>
-                  <Link href="#" onClick={(e) => { e.preventDefault(); openDetail(ex.id); }} className="text-sm text-indigo-600">查看</Link>
+                <div className="flex items-center justify-end">
+                  <Link href="#" onClick={(e) => { e.preventDefault(); openDetail(ex.id); }} className="text-xs text-indigo-600 hover:text-indigo-800">查看详情 →</Link>
                 </div>
               </div>
             ))}

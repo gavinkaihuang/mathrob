@@ -75,7 +75,8 @@ export function useExamPolling() {
     selectedQuestionFiles: File[], 
     selectedAnswerFiles: File[], 
     examMode: 'separated' | 'combined' = 'separated',
-    selectedCombinedFiles: File[] = []
+    selectedCombinedFiles: File[] = [],
+    examType: 'custom' | 'diagnostic' | 'midterm' | 'final' = 'custom'
   ) => {
     if (examMode === 'separated' && (selectedQuestionFiles.length === 0 || selectedAnswerFiles.length === 0)) return;
     if (examMode === 'combined' && selectedCombinedFiles.length === 0) return;
@@ -89,6 +90,9 @@ export function useExamPolling() {
     
     // Add exam_mode parameter
     formData.append('exam_mode', examMode);
+    
+    // Add exam_type parameter
+    formData.append('exam_type', examType);
     
     if (examMode === 'separated') {
       // Add question images
