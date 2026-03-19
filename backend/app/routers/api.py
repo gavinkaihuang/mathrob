@@ -1,15 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
 from sqlalchemy.orm import Session
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Any
 from pydantic import BaseModel
 from ..database import get_db
 from ..models import Problem, KnowledgePoint, KnowledgeNode, LearningRecord, SolutionAttempt, User, PracticeProblem, PracticeSession, UserProgress, APICallLog, SystemLog, DailyReview
 import os
 import json
 import re
+import asyncio
+from difflib import SequenceMatcher
 from datetime import datetime
 from ..services.ai_service import AIService, AIServiceException
+from ..services.upload_service import upload_to_s3, delete_uploaded_object, get_accessible_image_url
 from ..auth_deps import get_current_user
+import PIL.Image
 
 UPLOAD_DIR = "backend/uploads"
 if not os.path.exists(UPLOAD_DIR):
@@ -17,6 +21,13 @@ if not os.path.exists(UPLOAD_DIR):
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
 ai_service = AIService()
+
+
+def _hydrate_problem_images(problem: Problem):
+    problem.image_path = get_accessible_image_url(problem.image_path)
+    if getattr(problem, "solution_attempts", None):
+        for attempt in problem.solution_attempts:
+            attempt.image_path = get_accessible_image_url(attempt.image_path)
 
 class SolutionAttemptSchema(BaseModel):
     id: int
@@ -57,6 +68,14 @@ class ProblemSchema(BaseModel):
     class Config:
         from_attributes = True
 
+
+class PaginatedProblemsResponse(BaseModel):
+    items: List[ProblemSchema]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
 class KnowledgePointSchema(BaseModel):
     id: int
     name: str
@@ -95,9 +114,64 @@ def get_problems(
             problem.current_mastery_level = record.mastery_level
         else:
             problem.current_mastery_level = None
+        problem.image_path = get_accessible_image_url(problem.image_path)
         problems.append(problem)
         
     return problems
+
+
+@router.get("/problems/wrong", response_model=PaginatedProblemsResponse)
+def get_wrong_problems(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    mastery: Optional[int] = None,
+    recent_days: Optional[int] = Query(default=None, ge=1, le=365),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get paginated wrong-answer notebook problems.
+
+    Returns a standardized payload with pagination metadata for frontend pagination UI.
+    """
+    from datetime import timedelta
+    from sqlalchemy import or_
+
+    base_query = db.query(Problem, LearningRecord).outerjoin(
+        LearningRecord,
+        (Problem.id == LearningRecord.problem_id) & (LearningRecord.user_id == current_user.id)
+    ).filter(
+        Problem.user_id == current_user.id,
+        or_(LearningRecord.id == None, LearningRecord.status != "correct")
+    )
+
+    if mastery is not None:
+        base_query = base_query.filter(LearningRecord.mastery_level == mastery)
+
+    if recent_days is not None:
+        cutoff = datetime.utcnow() - timedelta(days=recent_days)
+        base_query = base_query.filter(LearningRecord.last_reviewed_at != None).filter(LearningRecord.last_reviewed_at >= cutoff)
+
+    total_count = base_query.count()
+    skip = (page - 1) * page_size
+
+    results = base_query.order_by(Problem.created_at.desc()).offset(skip).limit(page_size).all()
+
+    problems: List[Problem] = []
+    for problem, record in results:
+        problem.current_mastery_level = record.mastery_level if record else None
+        problem.image_path = get_accessible_image_url(problem.image_path)
+        problems.append(problem)
+
+    total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
+
+    return {
+        "items": problems,
+        "total": total_count,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages
+    }
 
 @router.get("/problems/{problem_id}", response_model=ProblemSchema)
 def get_problem(problem_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -112,6 +186,8 @@ def get_problem(problem_id: int, db: Session = Depends(get_db), current_user: Us
     ).first()
     if record:
         problem.current_mastery_level = record.mastery_level
+
+    _hydrate_problem_images(problem)
         
     return problem
 
@@ -572,13 +648,7 @@ async def submit_practice_solution(
     if not practice:
         raise HTTPException(status_code=404, detail="Practice problem not found")
         
-    # Save file
-    safe_filename = f"practice_{problem_id}_{int(datetime.utcnow().timestamp())}_{file.filename}"
-    file_location = os.path.join(UPLOAD_DIR, safe_filename)
-    
-    with open(file_location, "wb") as buffer:
-        content = await file.read()
-        buffer.write(content)
+    saved_upload = upload_to_s3(file, prefix="practice-solutions")
         
     # Extract AI reference answer
     problem_latex = practice.latex_content or "N/A"
@@ -596,7 +666,7 @@ async def submit_practice_solution(
             
     # Call AI Teaching Model to analyze the handwritten solution vs reference
     try:
-        feedback_data = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id)
+        feedback_data = await ai_service.analyze_solution(problem_latex, standard_solution, saved_upload.s3_uri, target_id=problem_id, user_id=current_user.id)
         feedback = feedback_data["feedback_json"]
     except AIServiceException as e:
         status_code = 429 if e.error_type == "rate_limit" else 401 if e.error_type == "auth_error" else 503
@@ -622,13 +692,7 @@ async def submit_solution(
     if not problem:
         raise HTTPException(status_code=404, detail="Problem not found")
         
-    # Save file
-    safe_filename = f"solution_{problem_id}_{int(datetime.utcnow().timestamp())}_{file.filename}"
-    file_location = os.path.join(UPLOAD_DIR, safe_filename)
-    
-    with open(file_location, "wb") as buffer:
-        content = await file.read()
-        buffer.write(content)
+    saved_upload = upload_to_s3(file, prefix="solutions")
         
     # Prepare context for AI
     problem_latex = problem.latex_content or "N/A"
@@ -644,7 +708,7 @@ async def submit_solution(
             
     # Call AI
     try:
-        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id)
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, saved_upload.s3_uri, target_id=problem_id, user_id=current_user.id)
         feedback = ai_response["feedback_json"]
         used_model = ai_response["ai_model"]
     except AIServiceException as e:
@@ -662,7 +726,7 @@ async def submit_solution(
     attempt = SolutionAttempt(
         problem_id=problem_id,
         user_id=current_user.id,
-        image_path=safe_filename,
+        image_path=saved_upload.public_url,
         ai_model_used=used_model,
         ai_score=feedback.get("score") if isinstance(feedback, dict) else None,
         ai_evaluation=feedback,
@@ -671,6 +735,7 @@ async def submit_solution(
     db.add(attempt)
     db.commit()
     db.refresh(attempt)
+    attempt.image_path = get_accessible_image_url(attempt.image_path)
     
     return attempt
 
@@ -688,13 +753,7 @@ async def submit_homework(
     if not problem:
         raise HTTPException(status_code=404, detail="Problem not found")
         
-    # Save file
-    safe_filename = f"homework_{problem_id}_{int(datetime.utcnow().timestamp())}_{file.filename}"
-    file_location = os.path.join(UPLOAD_DIR, safe_filename)
-    
-    with open(file_location, "wb") as buffer:
-        content = await file.read()
-        buffer.write(content)
+    saved_upload = upload_to_s3(file, prefix="homework")
         
     # Prepare context for AI
     problem_latex = problem.latex_content or "N/A"
@@ -708,7 +767,7 @@ async def submit_homework(
             
     # Call AI
     try:
-        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id)
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, saved_upload.s3_uri, target_id=problem_id, user_id=current_user.id)
         feedback = ai_response["feedback_json"]
         used_model = ai_response["ai_model"]
     except AIServiceException as e:
@@ -726,7 +785,7 @@ async def submit_homework(
     attempt = SolutionAttempt(
         problem_id=problem_id,
         user_id=current_user.id,
-        image_path=safe_filename,
+        image_path=saved_upload.public_url,
         ai_model_used=used_model,
         ai_score=feedback.get("score") if isinstance(feedback, dict) else None,
         ai_evaluation=feedback,
@@ -736,6 +795,7 @@ async def submit_homework(
     db.add(attempt)
     db.commit()
     db.refresh(attempt)
+    attempt.image_path = get_accessible_image_url(attempt.image_path)
     
     # Process knowledge mastery if exist
     if isinstance(feedback, dict) and "knowledge_analysis" in feedback:
@@ -790,237 +850,995 @@ class ExamSessionSchema(BaseModel):
     class Config:
         from_attributes = True
 
-async def process_full_exam(task_id: int, user_id: int, image_paths: List[str], image_urls: List[str] = None):
-    # Note: We must create a new DB session inside the background task
-    from ..database import SessionLocal
-    from ..models import ExamRecord, ExamProblemResult, KnowledgeNode, UserKnowledgeMastery
-    from ..main import ai_service
-    db = SessionLocal()
-    try:
-        # Get standard knowledge tags for strict prompt constraints
-        nodes = db.query(KnowledgeNode).all()
-        standard_tags_list = [n.name for n in nodes]
+def _sanitize_json_string(s: str) -> str:
+    r"""
+    Sanitize JSON-ish text to handle unescaped backslashes and control chars
+    This handles LaTeX commands like \sqrt, \frac that weren't escaped properly
+    """
+    # Normalize line endings
+    s = s.replace('\r\n', '\n').replace('\r', '\n')
+    # Remove control chars except \n, \t
+    s = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', s)
+    # Escape single backslashes that are not part of valid JSON escapes (\", \\, \/, \b, \f, \n, \r, \t, \uXXXX)
+    s = re.sub(r'(?<!\\)\\(?!["\\/bfnrtu])', r'\\\\', s)
+    return s
 
-        # Build upgraded system prompt requesting structured extraction including paper title,
-        # original question text and user answer text for each problem.
-        prompt = f'''
-你是一位资深数学阅卷专家。请阅读提供的试卷与答题照片，严格输出以下 JSON 结构（不要包含多余文本）：
-{ {
-    "paper_title": "精准提取图片中的试卷大标题（如 '2025年高三一模数学'）。若无明显标题，请生成专业名称。",
-    "total_score": 85,
-    "overall_feedback": "整体评价和学情分析（简洁的 Markdown 文本）",
+
+async def _extract_exam_structure(answer_image_paths: List[str], question_image_paths: List[str], ai_service):
+    """
+    Stage 1: Lightweight Structure Extraction
+    Purpose: Scan answer images ONLY to build question index, ignoring question drafts
+    
+    Key Architectural Change: Explicitly separates answer images from question images
+    to prevent AI from confusing draft work with the actual answers.
+    
+    Returns: {'paper_title', 'question_numbers', 'page_count', 'model'}
+    """
+    prompt = f'''你是一个试卷结构分析助手。本次分析，我向你提供两组独立的图片资源：
+【第一组 - 学生答题卡/答题纸（共{len(answer_image_paths)}页）】：这些图片包含学生的最终作答
+【第二组 - 试卷原题（共{len(question_image_paths)}页）】：这些图片包含题目原文（仅用于理解题意）
+
+【核心指令 - 严格遵守】：
+1. **答案唯一来源**：你必须且只能从【学生答题卡/答题纸】中识别题号
+2. **无视草稿**：对于【试卷原题】上出现的任何手写笔迹、勾画或文字标注，必须**完全无视**
+3. **防止混淆**：绝不能将试卷原题上的手写内容误认为是学生答案
+
+请仅依赖第一组（答题卡）的内容，完整精确地列出所有题号。
+
+严格输出 JSON 格式，不要任何额外文本：
+{{
+    "paper_title": "提取的试卷标题或名称",
+    "total_question_count": {len(answer_image_paths)},
+    "question_numbers": ["1", "2", "3", "4", "5", "6", "7", "8"],
+    "notes": "如果有任何题号缺失或不清楚的地方，请说明"
+}}
+'''
+    
+    # Build content list with explicit ordering:
+    # First add answer images, then question images
+    # This helps Gemini understand the context
+    content = [prompt]
+    
+    # Add answer images first (with inline text labels)
+    for i, img_path in enumerate(answer_image_paths):
+        try:
+            img = ai_service._open_image_for_model(img_path)
+            content.append(img)
+        except Exception as e:
+            print(f"Warning: failed to open answer image {img_path}: {e}")
+    
+    # Add question images second (with inline text labels)
+    for i, img_path in enumerate(question_image_paths):
+        try:
+            img = ai_service._open_image_for_model(img_path)
+            content.append(img)
+        except Exception as e:
+            print(f"Warning: failed to open question image {img_path}: {e}")
+    
+    # Call with pre-built content list
+    text, used_model, _ = await ai_service.call_gemini_with_fallback(
+        'teaching', 
+        content
+    )
+    
+    # Parse JSON with aggressive sanitization
+    text = text.strip()
+    for prefix in ["```json", "```"]:
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    if text.endswith("```"):
+        text = text[:-3]
+    
+    start = text.find('{')
+    end = text.rfind('}')
+    json_text = text[start:end+1] if start != -1 and end != -1 else text
+    
+    # Try multiple sanitization strategies
+    last_exc = None
+    for candidate in [json_text, _sanitize_json_string(json_text)]:
+        try:
+            result = json.loads(candidate.strip())
+            last_exc = None
+            break
+        except Exception as e:
+            last_exc = e
+    
+    if last_exc:
+        # Last resort: try unicode-escape decode then sanitize
+        try:
+            alt = json_text.encode('utf-8').decode('unicode_escape')
+            alt2 = _sanitize_json_string(alt)
+            result = json.loads(alt2.strip())
+            last_exc = None
+        except Exception as e3:
+            last_exc = e3
+    
+    if last_exc:
+        raise ValueError(f"Failed to parse JSON from Stage 1: {str(last_exc)}\nJSON text: {json_text[:200]}")
+    
+    return {
+        'paper_title': result.get('paper_title', '试卷'),
+        'question_numbers': result.get('question_numbers', []),
+        'total_question_count': result.get('total_question_count', 0),
+        'model': used_model,
+        'page_count': len(answer_image_paths)
+    }
+
+
+async def _grade_exam_batch(
+    batch_numbers: List[str],
+    question_image_paths: List[str],
+    answer_image_paths: List[str],
+    standard_tags_list: List[str],
+    ai_service,
+    batch_index: int,
+    total_batches: int
+):
+    """
+    Stage 2: Focused Batch Grading with Image Separation
+    Purpose: Grade 2-3 questions per batch, using answer images as authoritative source
+    
+    Key Architectural Change: Explicitly separates question and answer images,
+    ensuring AI grades only based on student's final answers in the answer sheet.
+    
+    Returns: {'problems': [...], 'batch_index', 'model', 'tokens_used'}
+    """
+    batch_str = ", ".join(batch_numbers)
+    
+    prompt = f'''你是一位严格的高中数学阅卷专家。本次批改，我向你提供两组独立的图片资源：
+【第一组 - 答题卡/答题纸（共{len(answer_image_paths)}页）】：包含学生的最终作答
+【第二组 - 试卷原题（共{len(question_image_paths)}页）】：包含题目的原始文本
+
+你需要批改第 {batch_str} 题。
+
+【绝对批改纪律 - 严格遵守】：
+1. **答案唯一来源**：你必须且只能从【学生答题卡/答题纸】中提取学生的答案进行批改。
+2. **题目理解参考**：【试卷原题】仅用于理解题意，不能作为学生答案的来源。
+3. **无视草稿**：对于【试卷原题】上出现的任何手写笔迹、勾画、选项填涂或草稿演算，必须**绝对无视**，绝不能作为评分依据。
+4. **防混淆比对**：对于选择题和填空题，必须在答题卡指定的题号位置寻找学生的最终结果。若答题卡上该题空白，即便原题上有任何手写内容，也必须判为未作答（0分）。
+
+## 批改任务信息
+- 这是批改任务的第 {batch_index+1}/{total_batches} 批
+- 本批题号：{batch_str}
+- 每题必须包含完整的原题文本（来自试卷原题）、学生答案（来自答题卡）和批改反馈
+
+## 知识点标签限制
+**只能**从以下列表中选择：{standard_tags_list}
+
+## 输出格式（严格JSON）
+{{
+    "batch_index": {batch_index},
+    "graded_question_count": {len(batch_numbers)},
     "problems": [
-        {
+        {{
             "problem_number": "1",
-            "original_question_text": "精准识别并输出该题的完整原题文本",
-            "user_answer_text": "识别并输出学生手写的具体解答过程",
+            "original_question_text": "从试卷原题中提取的完整原题文本",
+            "user_answer_text": "从答题卡中提取的学生手写答案",
             "score": 10,
             "max_score": 10,
-            "knowledge_tag": "对数运算",
-            "feedback": "批改意见与扣分点..."
-        }
+            "knowledge_tag": "知识点名称",
+            "feedback": "严格基于答题卡内容的批改反馈"
+        }}
     ]
-} }
-
-附注：当返回知识点标签时，**只能**从以下列表中选择：{standard_tags_list}。
-请保证 JSON 字段完整且可解析，所有文本字段尽量保留换行（使用 \n 表示）。
+}}
 '''
-
-        # We use 'teaching' model as it handles multi-modal well
-        text, used_model, _ = await ai_service.call_gemini_with_fallback('teaching', prompt, image_paths=image_paths)
-
-        text = text.strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-
-        # Extract JSON object between the first '{' and last '}' to avoid surrounding commentary
-        start = text.find('{')
-        end = text.rfind('}')
-        json_text = text[start:end+1] if start != -1 and end != -1 else text
-
-        # Persist raw AI text to SystemLog and to exam.overall_evaluation for inspection
+    
+    # Build content list with explicit ordering:
+    # Answer images first (as authoritative source), then question images (for context)
+    content = [prompt]
+    
+    # Add answer images first (authoritative source)
+    for img_path in answer_image_paths:
         try:
-            from ..models import SystemLog
-            log = SystemLog(level="ERROR", category="teaching", message="Raw AI response for exam",
-                            details={"text_preview": text[:200]},)
-            db.add(log)
-            db.commit()
-        except Exception:
-            db.rollback()
+            img = ai_service._open_image_for_model(img_path)
+            content.append(img)
+        except Exception as e:
+            print(f"Warning: failed to open answer image {img_path}: {e}")
+    
+    # Add question images second (context only)
+    for img_path in question_image_paths:
+        try:
+            img = ai_service._open_image_for_model(img_path)
+            content.append(img)
+        except Exception as e:
+            print(f"Warning: failed to open question image {img_path}: {e}")
+    
+    # Call with pre-built content list
+    text, used_model, tokens = await ai_service.call_gemini_with_fallback('teaching', content)
+    
+    # Parse JSON with aggressive sanitization
+    text = text.strip()
+    for prefix in ["```json", "```"]:
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    if text.endswith("```"):
+        text = text[:-3]
+    
+    start = text.find('{')
+    end = text.rfind('}')
+    json_text = text[start:end+1] if start != -1 and end != -1 else text
+    
+    # Try multiple sanitization strategies
+    last_exc = None
+    for candidate in [json_text, _sanitize_json_string(json_text)]:
+        try:
+            result = json.loads(candidate.strip())
+            last_exc = None
+            break
+        except Exception as e:
+            last_exc = e
+    
+    if last_exc:
+        # Last resort: try unicode-escape decode then sanitize
+        try:
+            alt = json_text.encode('utf-8').decode('unicode_escape')
+            alt2 = _sanitize_json_string(alt)
+            result = json.loads(alt2.strip())
+            last_exc = None
+        except Exception as e3:
+            last_exc = e3
+    
+    if last_exc:
+        raise ValueError(f"Failed to parse JSON from Stage 2 Batch {batch_index}: {str(last_exc)}\nJSON text: {json_text[:200]}")
+    
+    return {
+        'batch_index': batch_index,
+        'problems': result.get('problems', []),
+        'model': used_model,
+        'tokens_used': tokens,
+        'graded_count': result.get('graded_question_count', 0)
+    }
 
-        # Helper: sanitize JSON-ish text to handle unescaped backslashes and control chars
-        def sanitize_candidate(s: str) -> str:
-            # Normalize line endings
-            s = s.replace('\r\n', '\n').replace('\r', '\n')
-            # Remove control chars except \n, \t
-            s = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', s)
-            # Escape single backslashes that are not part of valid JSON escapes
-            s = re.sub(r'(?<!\\)\\(?!["\\/bfnrtu])', r'\\\\', s)
-            return s
 
-        last_exc = None
-        # Try parsing progressively more aggressive sanitization strategies
-        for candidate in [json_text, sanitize_candidate(json_text)]:
-            try:
-                result_json = json.loads(candidate.strip())
-                last_exc = None
-                break
-            except Exception as e:
-                last_exc = e
+async def _generate_overall_feedback(
+    all_problems: List[dict],
+    paper_title: str,
+    total_score: float,
+    ai_service
+):
+    """
+    Generate comprehensive feedback based on all graded problems
+    """
+    problem_summary = "\n".join([
+        f"- 题{p['problem_number']}: {p['score']}/{p['max_score']} ({p['knowledge_tag']})"
+        for p in all_problems
+    ])
+    
+    prompt = f'''基于以下批改结果，生成一份简洁的学生学情分析反馈。
 
-        if last_exc:
-            # As a last resort, try unicode-escape decode then sanitize
-            try:
-                alt = json_text.encode('utf-8').decode('unicode_escape')
-                alt2 = sanitize_candidate(alt)
-                result_json = json.loads(alt2.strip())
-                last_exc = None
-            except Exception as e3:
-                last_exc = e3
+试卷：{paper_title}
+总分：{total_score}
 
-        if last_exc:
-            # Save the raw text into exam.overall_evaluation for manual inspection and raise
-            exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
-            if exam:
-                exam.status = 'failed'
-                exam.overall_evaluation = f"AI Raw Text (truncated): {text[:200]}\n\nParseError: {str(last_exc)}"
-                db.commit()
-            raise last_exc
+题目成绩概览：
+{problem_summary}
 
-        # Save results 
+请生成一份 50-100 字的学生学情分析，包括：
+1. 总体表现评价
+2. 主要优势领域
+3. 需要改进的方向
+
+输出纯文本，无需 JSON 格式。
+'''
+    
+    text, used_model, _ = await ai_service.call_gemini_with_fallback('teaching', prompt, image_paths=None)
+    return text.strip()
+
+
+def _natural_sort_key(problem: dict) -> tuple:
+    """
+    Extract natural sort key from problem number for correct ordering
+    Handles: "1", "10", "2", "4(1)", "12a", etc.
+    Returns: tuple of integers for proper numeric ordering
+    """
+    num_str = str(problem.get("problem_number", "")).strip()
+    if not num_str:
+        return (0,)
+    
+    # Extract all digit sequences from problem_number
+    # e.g., "4(1)" → [4, 1], "12a" → [12]
+    numbers = re.findall(r'\d+', num_str)
+    
+    if numbers:
+        return tuple(int(n) for n in numbers)
+    else:
+        # Fallback: return string hash for non-numeric problem numbers
+        return (0, hash(num_str))
+
+
+def _normalize_paper_title(title: Optional[str]) -> str:
+    if not title:
+        return ""
+    normalized = title.strip().lower()
+    normalized = re.sub(r'\s+', '', normalized)
+    normalized = re.sub(r'[\-—_·•,，。:：;；!！?？"“”\'‘’()（）\[\]{}<>《》]', '', normalized)
+    return normalized
+
+
+def _is_similar_paper_title(title_a: Optional[str], title_b: Optional[str]) -> bool:
+    normalized_a = _normalize_paper_title(title_a)
+    normalized_b = _normalize_paper_title(title_b)
+
+    if not normalized_a or not normalized_b:
+        return False
+
+    if normalized_a == normalized_b:
+        return True
+
+    shorter, longer = (normalized_a, normalized_b) if len(normalized_a) <= len(normalized_b) else (normalized_b, normalized_a)
+    if len(shorter) >= 6 and shorter in longer:
+        return True
+
+    return SequenceMatcher(None, normalized_a, normalized_b).ratio() >= 0.90
+
+
+def _find_duplicate_exam_by_title(db: Session, user_id: int, paper_title: str, exclude_exam_id: Optional[int] = None):
+    from ..models import ExamRecord
+
+    if not paper_title:
+        return None
+
+    query = db.query(ExamRecord).filter(ExamRecord.user_id == user_id)
+    if exclude_exam_id is not None:
+        query = query.filter(ExamRecord.id != exclude_exam_id)
+
+    candidates = query.order_by(ExamRecord.created_at.desc()).limit(200).all()
+    for exam in candidates:
+        if _is_similar_paper_title(paper_title, exam.paper_name or ""):
+            return exam
+
+    return None
+
+
+async def process_full_exam(
+    task_id: int, 
+    user_id: int, 
+    question_image_paths: List[str], 
+    answer_image_paths: List[str],
+    image_urls: List[str] = None,
+    exam_mode: str = "separated",
+    precomputed_question_numbers: Optional[List[str]] = None,
+    precomputed_paper_title: Optional[str] = None,
+    precomputed_stage1_model: Optional[str] = None
+):
+    """
+    Two-Stage Exam Grading Pipeline with Image Separation & Dynamic Model Routing:
+    Stage 1: Lightweight structure extraction (identify all question numbers from answer images)
+    Stage 2: Parallel batch grading (2-3 questions per batch using asyncio.gather)
+    Stage 3: Result aggregation, weighted knowledge mastery update, and database persistence
+    
+    CRITICAL: Database session is held ONLY during Stage 1 and Stage 3.
+    During Stage 2 (long-running AI calls), the DB session is closed to prevent:
+    - Connection timeouts from 5-10 minute AI requests
+    - Database resource exhaustion
+    - Firewall/proxy disconnection issues
+    
+    Key Improvements:
+    - Dynamically routes to appropriate teaching model based on exam_type
+    - Implements weighted moving average for knowledge mastery calculation
+    - Explicitly separates question images from answer images
+    - Lazy session pattern: DB connection only acquired when needed
+    """
+    from ..database import SessionLocal
+    from ..models import ExamRecord, ExamProblemResult, KnowledgeNode, UserKnowledgeMastery, SystemLog, OperationLog, ExamType
+    from ..main import ai_service
+    from ..services.model_manager import model_manager
+    from ..services.knowledge_mastery_service import batch_update_knowledge_mastery, get_weight_for_exam_type
+    
+    pipeline_start_time = datetime.utcnow()
+    selected_teaching_model = None  # Will be set based on exam_type
+    db = None  # Will be created when needed
+    standard_tags_list = []  # Fetch early, before AI calls
+    exam_type = None
+    all_problems = []
+    batch_models = []
+    mastery_update_summary = {}
+    
+    try:
+        # ============================================================
+        # STAGE 1a: FETCH CONFIGURATION (Database only - quick)
+        # Close DB immediately after fetching config
+        # ============================================================
+        db = SessionLocal()
+        print(f"[Exam {task_id}] Stage 1a: Fetching exam configuration...")
+        
+        # FETCH EXAM RECORD & DETERMINE TEACHING MODEL
         exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
         if not exam:
-            return # Task deleted/invalid
-
-        # Save parsed paper title if present
-        paper_title = result_json.get("paper_title") or result_json.get("paper_name")
-        if paper_title:
-            exam.paper_name = paper_title
-
-        # Persist image_urls if provided
-        if image_urls:
-            exam.image_urls = image_urls
-
-        exam.total_score = result_json.get("total_score", 0)
-        # Map older field name and new overall_feedback field
-        exam.overall_evaluation = result_json.get("overall_evaluation", result_json.get("comprehensive_report", ""))
-        exam.overall_feedback = result_json.get("comprehensive_report", result_json.get("overall_evaluation", ""))
-        # Persist AI model name if available
+            raise ValueError(f"Exam record {task_id} not found")
+        
+        exam_type = exam.exam_type or ExamType.CUSTOM
+        print(f"[Exam {task_id}] Exam Type: {exam_type.value}")
+        
+        # Get the appropriate teaching model based on exam type
         try:
-            # `used_model` was returned by the AI call
-            exam.ai_model = used_model
-        except Exception:
-            pass
+            selected_teaching_model = model_manager.get_teaching_model_for_exam_type(db, exam_type)
+            print(f"[Exam {task_id}] Selected Teaching Model: {selected_teaching_model}")
+        except Exception as e:
+            print(f"[Exam {task_id}] ⚠️ Failed to fetch exam_type-specific model: {e}")
+            selected_teaching_model = None
+        
+        # Get standard knowledge tags (fetch into memory BEFORE closing db)
+        nodes = db.query(KnowledgeNode).all()
+        standard_tags_list = [n.name for n in nodes]
+        print(f"[Exam {task_id}] Fetched {len(standard_tags_list)} standard knowledge tags")
+        
+        # CLOSE DATABASE IMMEDIATELY after fetching config
+        # This prevents holding a connection during long AI calls
+        print(f"[Exam {task_id}] Closing DB session before Stage 1b (AI extraction)...")
+        try:
+            db.close()
+        except Exception as e:
+            print(f"[Exam {task_id}] Warning: Error closing DB after config fetch: {e}")
+        db = None
+        
+        # ============================================================
+        # STAGE 1b: STRUCTURE EXTRACTION (AI only - long-running)
+        # Database connection is closed, preventing connection pooling issues
+        # ============================================================
+        print(f"[Exam {task_id}] Stage 1b: Extracting exam structure from {len(answer_image_paths)} answer images...")
+
+        if precomputed_question_numbers is not None and precomputed_paper_title is not None:
+            question_numbers = precomputed_question_numbers
+            paper_title = precomputed_paper_title
+            stage1_model_used = precomputed_stage1_model or "precomputed_stage1"
+            structure = {
+                "question_numbers": question_numbers,
+                "paper_title": paper_title,
+                "model": stage1_model_used
+            }
+            print(f"[Exam {task_id}] Stage 1b: Using precomputed structure from upload preflight")
+        else:
+            structure = await _extract_exam_structure(
+                answer_image_paths=answer_image_paths,
+                question_image_paths=question_image_paths,
+                ai_service=ai_service
+            )
+            question_numbers = structure['question_numbers']
+            paper_title = structure['paper_title']
+        
+        print(f"[Exam {task_id}] Stage 1b Complete: Found {len(question_numbers)} questions: {question_numbers}")
+        
+        if not question_numbers:
+            raise ValueError("No questions detected in exam. OCR may have failed.")
+        
+        # ============================================================
+        # Stage 1c: LOG EXTRACTION (Database only - post-AI)
+        # Re-acquire DB session to log Stage 1 results
+        # ============================================================
+        print(f"[Exam {task_id}] Stage 1c: Re-acquiring DB session to log Stage 1 completion...")
+        db = SessionLocal()
+        
+        log_s1 = SystemLog(
+            level="INFO",
+            category="teaching",
+            message=f"Exam {task_id} Stage 1: Extracted {len(question_numbers)} questions",
+            details={
+                "stage": 1,
+                "paper_title": paper_title,
+                "question_numbers": question_numbers,
+                "model_used": structure['model']
+            }
+        )
+        
+        # Attempt to commit with retry logic
+        try:
+            db.add(log_s1)
+            db.commit()
+            print(f"[Exam {task_id}] Stage 1 log saved successfully")
+        except Exception as commit_error:
+            print(f"[Exam {task_id}] ⚠️ Stage 1 commit failed: {commit_error}")
+            try:
+                db.rollback()
+            except:
+                pass
+            # Reconnect and retry once
+            print(f"[Exam {task_id}] Attempting to reconnect and retry...")
+            try:
+                db.close()
+            except:
+                pass
+            db = SessionLocal()
+            try:
+                db.add(log_s1)
+                db.commit()
+                print(f"[Exam {task_id}] Stage 1 log saved successfully (after reconnect)")
+            except Exception as retry_error:
+                print(f"[Exam {task_id}] ⚠️ Stage 1 log save failed even after reconnect: {retry_error}")
+                # Continue without logging - don't fail the entire pipeline
+        
+        # CLOSE DATABASE SESSION BEFORE STAGE 2
+        # Stage 2 involves long-running AI calls (5-10 minutes)
+        # Holding the DB connection open during this time risks:
+        # - Connection timeouts and firewall disconnects
+        # - Database resource exhaustion
+        # Pattern: Lazy session - only hold connection when needed
+        print(f"[Exam {task_id}] Closing DB session before Stage 2 to prevent long-held connections...")
+        try:
+            db.close()
+        except Exception as e:
+            print(f"[Exam {task_id}] Warning: Error closing DB after Stage 1: {e}")
+        db = None  # Signal that session is closed
+        
+        # ============================================================
+        # STAGE 2: PARALLEL BATCH GRADING (Chunked Processing)
+        # ============================================================
+        # Create batches of 2-3 questions each
+        batch_size = 3
+        batches = [
+            question_numbers[i:i+batch_size]
+            for i in range(0, len(question_numbers), batch_size)
+        ]
+        
+        print(f"[Exam {task_id}] Stage 2: Processing {len(batches)} batches with asyncio.gather...")
+        
+        # Limit concurrent AI calls to prevent connection pool exhaustion.
+        # Each call_gemini_with_fallback briefly opens a DB session to fetch model/token
+        # config; without a semaphore, all batches race at once and can saturate the pool.
+        _batch_semaphore = asyncio.Semaphore(5)
+
+        async def _bounded_batch(batch, idx):
+            async with _batch_semaphore:
+                return await _grade_exam_batch(
+                    batch_numbers=batch,
+                    question_image_paths=question_image_paths,
+                    answer_image_paths=answer_image_paths,
+                    standard_tags_list=standard_tags_list,
+                    ai_service=ai_service,
+                    batch_index=idx,
+                    total_batches=len(batches)
+                )
+
+        batch_tasks = [_bounded_batch(batch, idx) for idx, batch in enumerate(batches)]
+        
+        # Execute all batches concurrently (max 5 at a time)
+        batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+        
+        # Check for errors
+        all_problems = []
+        batch_models = []
+        for result in batch_results:
+            if isinstance(result, Exception):
+                print(f"[Exam {task_id}] Batch grading error: {result}")
+                raise result
+            
+            problems = result.get('problems', [])
+            all_problems.extend(problems)
+            batch_models.append(result.get('model'))
+            
+            print(f"[Exam {task_id}] Batch {result['batch_index']}: Graded {result['graded_count']} questions")
+        
+        print(f"[Exam {task_id}] Stage 2 Complete: Total {len(all_problems)} problems graded")
+        
+        # DO NOT log Stage 2 yet - wait until DB session is re-acquired in Stage 3
+        # This keeps DB connection closed during the longest AI processing phase
+        
+        # ============================================================
+        # STAGE 3: RESULT AGGREGATION & DATABASE PERSISTENCE
+        # Re-acquire DB session for persistence operations only
+        # ============================================================
+        # All batch AI calls are done. Generate overall feedback BEFORE opening DB
+        # so we don't hold a connection during another 1-3 min AI call.
+        # Calculate total score first (needed by _generate_overall_feedback).
+        total_score = sum(p.get('score', 0) for p in all_problems)
+        print(f"[Exam {task_id}] Stage 3: Generating overall feedback (before DB open)...")
+        overall_feedback = await _generate_overall_feedback(
+            all_problems=all_problems,
+            paper_title=paper_title,
+            total_score=total_score,
+            ai_service=ai_service
+        )
+        
+        # All AI calls are now complete. Re-acquire DB connection for data persistence.
+        db = SessionLocal()
+        print(f"[Exam {task_id}] Stage 3: Re-acquired DB session for persistence layer")
+        
+        # Now log Stage 2 completion
+        log_s2 = SystemLog(
+            level="INFO",
+            category="teaching",
+            message=f"Exam {task_id} Stage 2: Batch grading completed",
+            details={
+                "stage": 2,
+                "total_batches": len(batches),
+                "batch_size": batch_size,
+                "problems_graded": len(all_problems),
+                "models_used": list(set(batch_models))
+            }
+        )
+        try:
+            db.add(log_s2)
+            db.commit()
+        except Exception as e:
+            print(f"[Exam {task_id}] ⚠️ Stage 2 log commit failed: {e}")
+            try:
+                db.rollback()
+            except:
+                pass
+            # Don't fail the pipeline for logging errors
+        
+        # ============================================================
+        # APPLY NATURAL SORTING TO ALL PROBLEMS
+        # ============================================================
+        # Sort problems by natural numeric order (not lexicographic)
+        # This fixes: "1", "10", "11", "2" → "1", "2", "10", "11"
+        # Also handles: "4(1)", "4(2)", "12a", etc.
+        print(f"[Exam {task_id}] Sorting {len(all_problems)} problems by natural order...")
+        all_problems.sort(key=_natural_sort_key)
+        
+        # Log the sorted problem numbers for verification
+        sorted_problem_numbers = [str(p.get('problem_number', '?')) for p in all_problems]
+        print(f"[Exam {task_id}] Problem order after sorting: {sorted_problem_numbers}")
+        
+        # Persist exam record and results
+        print(f"[Exam {task_id}] Stage 3: Aggregating results and saving to database...")
+        
+        exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
+        if not exam:
+            raise ValueError(f"Exam record {task_id} not found")
+        
+        # Set basic exam info
+        exam.paper_name = paper_title
+        exam.image_urls = image_urls
+        
+        # total_score and overall_feedback were computed before DB open (no AI call while holding connection)
+        exam.total_score = total_score
+        
+        # Use the first batch model or the latest
+        exam.ai_model = batch_models[0] if batch_models else "unknown"
+        
+        exam.overall_feedback = overall_feedback
+        exam.overall_evaluation = f"Graded via two-stage pipeline on {datetime.utcnow().isoformat()}"
         exam.status = "completed"
         exam.completed_at = datetime.utcnow()
-
-        # Sync Knowledge & Save Problems
-        problems = result_json.get("problems", [])
-        for p in problems:
-            tag = p.get("knowledge_tag", "未知")
-            score = p.get("score", 0)
-            max_score = p.get("max_score", 10)
-
-            # Save problem result
-            prob_res = ExamProblemResult(
+        
+        # Persist the actual teaching model used in this exam
+        if selected_teaching_model:
+            exam.ai_model = selected_teaching_model
+        else:
+            exam.ai_model = batch_models[0] if batch_models else "unknown"
+        
+        # Build all problem objects in memory, then bulk-insert in one call.
+        # This avoids N round-trips to Postgres (one per problem) and dramatically
+        # reduces the time the DB session is held open.
+        problem_objects = []
+        for p in all_problems:
+            if not p.get('problem_number'):
+                continue
+            problem_objects.append(ExamProblemResult(
                 exam_id=exam.id,
                 problem_number=str(p.get("problem_number", "未知")),
-                score=score,
-                max_score=max_score,
-                knowledge_tag=tag,
+                score=p.get("score", 0),
+                max_score=p.get("max_score", 10),
+                knowledge_tag=p.get("knowledge_tag", "未知"),
                 feedback=p.get("feedback", ""),
                 original_question_text=p.get("original_question_text", None),
                 user_answer_text=p.get("user_answer_text", None)
-            )
-            db.add(prob_res)
-
-            # Update User Knowledge Mastery
-            if max_score > 0 and tag in standard_tags_list:
-                mastery_ratio = score / max_score
-                ai_rating = round(mastery_ratio * 10, 1) # scale to 1-10
-
-                mastery_record = db.query(UserKnowledgeMastery).filter(
-                    UserKnowledgeMastery.user_id == user_id,
-                    UserKnowledgeMastery.knowledge_tag == tag
-                ).first()
-
-                if mastery_record:
-                    # Blend old rating with new rating (weighted average prioritizing new)
-                    old_rating = mastery_record.ai_assessed_rating or 5.0
-                    mastery_record.ai_assessed_rating = round(old_rating * 0.4 + ai_rating * 0.6, 1)
-                    self_r = mastery_record.user_self_rating or 5.0
-                    mastery_record.comprehensive_score = round(mastery_record.ai_assessed_rating * 0.6 + self_r * 0.4, 1)
-                else:
-                    new_mastery = UserKnowledgeMastery(
-                        user_id=user_id,
-                        knowledge_tag=tag,
-                        ai_assessed_rating=ai_rating,
-                        comprehensive_score=ai_rating
-                    )
-                    db.add(new_mastery)
-
-        db.commit()
-
-    except Exception as e:
-        print(f"Background Grading Failed: {e}")
-        exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
-        if exam:
-            exam.status = "failed"
-            exam.overall_evaluation = f"AI Error: {str(e)}"
+            ))
+        problem_save_count = len(problem_objects)
+        
+        # Flush problem results (single bulk operation)
+        try:
+            db.bulk_save_objects(problem_objects)
+            db.flush()
+        except Exception as flush_error:
+            print(f"[Exam {task_id}] ⚠️ Bulk flush error (connection may have been dropped): {flush_error}")
+            try:
+                db.rollback()
+            except:
+                pass
+            try:
+                db.close()
+            except:
+                pass
+            db = SessionLocal()
+            print(f"[Exam {task_id}] Reconnected after flush error, retrying bulk insert")
+            db.bulk_save_objects(problem_objects)
+            db.flush()
+        
+        # Batch update knowledge mastery using weighted algorithm
+        print(f"[Exam {task_id}] Stage 3: Updating knowledge mastery with weighted algorithm...")
+        mastery_update_summary = batch_update_knowledge_mastery(
+            db=db,
+            user_id=user_id,
+            problems=all_problems,
+            exam_type=exam_type,
+            standard_tags_list=standard_tags_list
+        )
+        
+        print(f"[Exam {task_id}] Knowledge mastery updated: {mastery_update_summary['updated_mastery_count']} records")
+        if mastery_update_summary['skipped']:
+            print(f"[Exam {task_id}] Skipped knowledge points: {mastery_update_summary['skipped']}")
+        
+        # Final commit with error handling
+        try:
             db.commit()
+        except Exception as commit_error:
+            print(f"[Exam {task_id}] ⚠️ Final commit failed: {commit_error}")
+            try:
+                db.rollback()
+            except:
+                pass
+            # Re-raise to trigger the except block for error logging
+            raise
+        
+        pipeline_duration = (datetime.utcnow() - pipeline_start_time).total_seconds()
 
+        # Business operation log (frontend-facing): write with short-lived session only.
+        # Do NOT reuse the long-lived pipeline DB session to avoid pool pressure.
+        operation_details = {
+            "exam_id": task_id,
+            "exam_type": exam_type.value if exam_type else "custom",
+            "exam_mode": exam_mode,
+            "model_used": selected_teaching_model or (batch_models[0] if batch_models else "unknown"),
+            "weight_applied": mastery_update_summary.get("exam_weight", 1.0),
+            "total_problems": len(all_problems),
+            "cost_time_ms": round(pipeline_duration * 1000, 2)
+        }
+        try:
+            with SessionLocal() as op_db:
+                op_log = OperationLog(
+                    user_id=user_id,
+                    action_type="整卷智能批阅",
+                    status="success",
+                    details=operation_details,
+                    created_at=datetime.utcnow()
+                )
+                op_db.add(op_log)
+                op_db.commit()
+        except Exception as op_log_error:
+            print(f"[Exam {task_id}] ⚠️ Failed to write operation log: {op_log_error}")
+        
+        # Final log
+        log_s3 = SystemLog(
+            level="INFO",
+            category="teaching",
+            message=f"Exam {task_id} completed via two-stage pipeline with weighted knowledge mastery",
+            details={
+                "stage": 3,
+                "exam_type": exam_type.value,
+                "teaching_model": selected_teaching_model or "default",
+                "problems_saved": problem_save_count,
+                "mastery_updated": mastery_update_summary['updated_mastery_count'],
+                "total_score": total_score,
+                "pipeline_duration_seconds": pipeline_duration,
+                "questions_expected": len(question_numbers),
+                "questions_graded": len(all_problems),
+                "completion_status": "SUCCESS" if problem_save_count == len(all_problems) else "PARTIAL"
+            }
+        )
+        db.add(log_s3)
+        db.commit()
+        
+        print(f"[Exam {task_id}] ✅ Pipeline completed in {pipeline_duration:.1f}s: {problem_save_count} problems saved, {mastery_update_summary['updated_mastery_count']} mastery records updated")
+        
+    except Exception as e:
+        print(f"[Exam {task_id}] ❌ Pipeline failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+        pipeline_duration = (datetime.utcnow() - pipeline_start_time).total_seconds()
+        try:
+            if exam_type:
+                failure_weight_applied = get_weight_for_exam_type(exam_type)
+            else:
+                failure_weight_applied = 1.0
+        except Exception:
+            failure_weight_applied = 1.0
+
+        failed_operation_details = {
+            "exam_id": task_id,
+            "exam_type": exam_type.value if exam_type else "custom",
+            "exam_mode": exam_mode,
+            "model_used": selected_teaching_model or (batch_models[0] if batch_models else "unknown"),
+            "weight_applied": failure_weight_applied,
+            "total_problems": len(all_problems),
+            "cost_time_ms": round(pipeline_duration * 1000, 2),
+            "error": str(e)
+        }
+
+        # Business operation log for failure (frontend-facing) with short-lived session
+        try:
+            with SessionLocal() as op_db:
+                op_log = OperationLog(
+                    user_id=user_id,
+                    action_type="整卷智能批阅",
+                    status="failed",
+                    details=failed_operation_details,
+                    created_at=datetime.utcnow()
+                )
+                op_db.add(op_log)
+                op_db.commit()
+        except Exception as op_log_error:
+            print(f"[Exam {task_id}] ⚠️ Failed to write failed operation log: {op_log_error}")
+        
+        # Try to update exam status and log error
+        # Note: db session may be None if error occurred during Stage 2 (AI calls)
+        try:
+            if db is None:
+                print(f"[Exam {task_id}] DB session was None during error - creating new session for error logging")
+                db = SessionLocal()
+            
+            exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
+            if exam:
+                exam.status = "failed"
+                exam.overall_evaluation = f"Pipeline Error: {str(e)}"
+                db.commit()
+                
+            error_log = SystemLog(
+                level="ERROR",
+                category="teaching",
+                message=f"Exam {task_id} pipeline failed",
+                details={"error": str(e), "traceback": traceback.format_exc()[:500]}
+            )
+            db.add(error_log)
+            db.commit()
+        except Exception as db_error:
+            print(f"[Exam {task_id}] Error updating exam status: {db_error}")
+            try:
+                if db:
+                    db.rollback()
+            except:
+                pass
+    
     finally:
-        db.close()
+        try:
+            if db:
+                db.close()
+                print(f"[Exam {task_id}] DB session closed successfully")
+        except Exception as cleanup_error:
+            print(f"[Exam {task_id}] Error closing DB session: {cleanup_error}")
 
 
 @router.post("/exams/upload_and_grade")
 async def upload_and_grade_exam(
     background_tasks: BackgroundTasks,
-    files: List[UploadFile] = File(...),
+    exam_mode: str = Form('separated'),
+    exam_type: str = Form('custom'),
+    force_regrade: bool = Form(False),
+    existing_exam_id: Optional[int] = Form(None),
+    question_images: List[UploadFile] = File(default=[]),
+    answer_images: List[UploadFile] = File(default=[]),
+    combined_images: List[UploadFile] = File(default=[]),
     paper_name: str = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    from ..models import ExamRecord
+    from ..models import ExamRecord, ExamProblemResult
+    from ..main import ai_service as main_ai_service
     
-    saved_paths = []
-    image_urls = []
-    # Ensure exams subdir exists
-    exams_dir = os.path.join(UPLOAD_DIR, "exams")
-    os.makedirs(exams_dir, exist_ok=True)
+    question_image_paths = []
+    answer_image_paths = []
+    combined_image_paths = []
+    all_image_urls = []
 
-    # Save files into exams subdirectory and build accessible URLs under /static/
-    for file in files:
-        safe_filename = f"exam_{current_user.id}_{int(datetime.utcnow().timestamp())}_{file.filename}"
-        file_location = os.path.join(exams_dir, safe_filename)
-
-        with open(file_location, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
-
-        saved_paths.append(file_location)
-        # Build URL relative to UPLOAD_DIR (which is mounted at /static)
-        rel_path = os.path.relpath(file_location, UPLOAD_DIR).replace('\\', '/')
-        image_urls.append(f"/static/{rel_path}")
+    if exam_mode == 'separated':
+        # ============================================================
+        # SEPARATED MODE: Process question and answer images separately
+        # ============================================================
         
-    # Create Task Record
-    exam_record = ExamRecord(
-        user_id=current_user.id,
-        status="processing",
-        image_paths=saved_paths,
-        image_urls=image_urls,
-        paper_name=(paper_name or f"摸底测试_{datetime.utcnow().strftime('%Y%m%d_%H%M')}")
-    )
-    db.add(exam_record)
-    db.commit()
-    db.refresh(exam_record)
+        # Save question images
+        for file in question_images:
+            saved_upload = upload_to_s3(file, prefix="exams")
+            question_image_paths.append(saved_upload.s3_uri)
+            all_image_urls.append(saved_upload.public_url)
+
+        # Save answer images
+        for file in answer_images:
+            saved_upload = upload_to_s3(file, prefix="exams")
+            answer_image_paths.append(saved_upload.s3_uri)
+            all_image_urls.append(saved_upload.public_url)
     
-    # Dispatch Async Task
-    background_tasks.add_task(process_full_exam, task_id=exam_record.id, user_id=current_user.id, image_paths=saved_paths, image_urls=image_urls)
+    elif exam_mode == 'combined':
+        # ============================================================
+        # COMBINED MODE: Process all images as combined (卷面作答)
+        # ============================================================
+        
+        # Save combined mode images
+        for file in combined_images:
+            saved_upload = upload_to_s3(file, prefix="exams")
+            combined_image_paths.append(saved_upload.s3_uri)
+            all_image_urls.append(saved_upload.public_url)
+        
+        # For combined mode, treat combined images as both question and answer
+        question_image_paths = combined_image_paths
+        answer_image_paths = combined_image_paths
+        
+    else:
+        raise ValueError(f"Invalid exam_mode: {exam_mode}")
+        
+    # Convert exam_type string to ExamType enum
+    from ..models import ExamType
+    try:
+        exam_type_enum = ExamType[exam_type.upper()]
+    except (KeyError, AttributeError):
+        exam_type_enum = ExamType.CUSTOM
+
+    # Stage 1 preflight: extract title/question numbers first, then run duplicate interception.
+    # This avoids launching expensive map-reduce grading when same paper was already graded.
+    try:
+        structure = await _extract_exam_structure(
+            answer_image_paths=answer_image_paths,
+            question_image_paths=question_image_paths,
+            ai_service=main_ai_service
+        )
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"试卷结构识别失败，请重试: {str(e)}")
+
+    extracted_paper_title = (structure.get("paper_title") or paper_name or f"摸底测试_{datetime.utcnow().strftime('%Y%m%d_%H%M')}").strip()
+    extracted_question_numbers = structure.get("question_numbers", [])
+    extracted_stage1_model = structure.get("model", "unknown")
+
+    duplicate_exam = _find_duplicate_exam_by_title(
+        db=db,
+        user_id=current_user.id,
+        paper_title=extracted_paper_title
+    )
+
+    if duplicate_exam and not force_regrade:
+        return {
+            "status": "duplicate_found",
+            "existing_exam_id": duplicate_exam.id,
+            "title": duplicate_exam.paper_name or extracted_paper_title
+        }
+
+    exam_record = None
+    target_exam = None
+
+    # Force regrade path: update existing record in place (do not insert a new row)
+    if force_regrade:
+        if existing_exam_id is not None:
+            target_exam = db.query(ExamRecord).filter(
+                ExamRecord.id == existing_exam_id,
+                ExamRecord.user_id == current_user.id
+            ).first()
+            if not target_exam:
+                raise HTTPException(status_code=404, detail="指定的历史试卷不存在")
+        elif duplicate_exam is not None:
+            target_exam = duplicate_exam
+
+    if target_exam:
+        db.query(ExamProblemResult).filter(ExamProblemResult.exam_id == target_exam.id).delete(synchronize_session=False)
+
+        target_exam.status = "processing"
+        target_exam.exam_type = exam_type_enum
+        target_exam.image_paths = question_image_paths + answer_image_paths
+        target_exam.image_urls = all_image_urls
+        target_exam.paper_name = extracted_paper_title
+        target_exam.total_score = None
+        target_exam.overall_feedback = None
+        target_exam.overall_evaluation = None
+        target_exam.ai_model = None
+        target_exam.completed_at = None
+
+        db.commit()
+        db.refresh(target_exam)
+        exam_record = target_exam
+    else:
+        exam_record = ExamRecord(
+            user_id=current_user.id,
+            status="processing",
+            exam_type=exam_type_enum,
+            image_paths=question_image_paths + answer_image_paths,
+            image_urls=all_image_urls,
+            paper_name=extracted_paper_title
+        )
+        db.add(exam_record)
+        db.commit()
+        db.refresh(exam_record)
+    
+    # Dispatch Async Task with separated image categories
+    background_tasks.add_task(
+        process_full_exam, 
+        task_id=exam_record.id, 
+        user_id=current_user.id, 
+        question_image_paths=question_image_paths,
+        answer_image_paths=answer_image_paths,
+        image_urls=all_image_urls,
+        exam_mode=exam_mode,
+        precomputed_question_numbers=extracted_question_numbers,
+        precomputed_paper_title=extracted_paper_title,
+        precomputed_stage1_model=extracted_stage1_model
+    )
     
     return {"task_id": exam_record.id, "status": exam_record.status}
 
@@ -1035,67 +1853,59 @@ def exams_history(db: Session = Depends(get_db), current_user: User = Depends(ge
             'paper_name': e.paper_name or f'试卷_{e.id}',
             'created_at': e.created_at,
             'ai_model': e.ai_model,
+            'exam_type': e.exam_type.value if e.exam_type else 'custom',
             'total_score': e.total_score,
             'status': e.status
         } for e in exams
     ]
 
 
-@router.get('/exams/{exam_id}')
-def exam_detail(exam_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    from ..models import ExamRecord, ExamProblemResult
-    exam = db.query(ExamRecord).filter(ExamRecord.id == exam_id, ExamRecord.user_id == current_user.id).first()
-    if not exam:
-        raise HTTPException(status_code=404, detail='Exam not found')
-
-    results = db.query(ExamProblemResult).filter(ExamProblemResult.exam_id == exam.id).order_by(ExamProblemResult.problem_number.asc()).all()
-
-    return {
-        'id': exam.id,
-        'paper_name': exam.paper_name,
-        'created_at': exam.created_at,
-        'ai_model': exam.ai_model,
-        'total_score': exam.total_score,
-        'status': exam.status,
-        'overall_feedback': exam.overall_feedback or exam.overall_evaluation,
-        'image_urls': exam.image_urls or [],
-        'results': [
-            {
-                'problem_number': r.problem_number,
-                'score': r.score,
-                'max_score': r.max_score,
-                'knowledge_tag': r.knowledge_tag,
-                'feedback': r.feedback,
-                'original_question_text': r.original_question_text,
-                'user_answer_text': r.user_answer_text
-            } for r in results
-        ]
-    }
-
 @router.get("/exams/task_status/{task_id}")
 def get_exam_status(task_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from ..models import ExamRecord, ExamProblemResult
+    from ..database import db_retry, engine
+    from sqlalchemy.exc import OperationalError
     
-    exam = db.query(ExamRecord).filter(
-        ExamRecord.id == task_id,
-        ExamRecord.user_id == current_user.id
-    ).first()
+    # Wrap all DB operations with retry to handle transient connection drops
+    # This endpoint is polled every 3-5 seconds during long exam processing
+    try:
+        @db_retry
+        def _fetch_exam():
+            return db.query(ExamRecord).filter(
+                ExamRecord.id == task_id,
+                ExamRecord.user_id == current_user.id
+            ).first()
+        
+        exam = _fetch_exam()
+    except OperationalError:
+        engine.dispose()
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable, please retry")
     
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
         
     response = {
+        "exam_id": exam.id,
         "id": exam.id,
         "status": exam.status,
         "total_score": exam.total_score,
         "overall_evaluation": exam.overall_evaluation,
-        "image_urls": exam.image_urls or [],
+        "image_urls": [get_accessible_image_url(url) for url in (exam.image_urls or [])],
         "created_at": exam.created_at,
         "results": []
     }
     
     if exam.status == "completed":
-        results = db.query(ExamProblemResult).filter(ExamProblemResult.exam_id == exam.id).all()
+        try:
+            @db_retry
+            def _fetch_results():
+                return db.query(ExamProblemResult).filter(ExamProblemResult.exam_id == exam.id).all()
+            
+            results = _fetch_results()
+        except OperationalError:
+            engine.dispose()
+            raise HTTPException(status_code=503, detail="Database connection temporarily unavailable, please retry")
+        
         response["results"] = [
             {
                 "problem_number": r.problem_number,
@@ -1110,6 +1920,47 @@ def get_exam_status(task_id: int, db: Session = Depends(get_db), current_user: U
         
     return response
 
+
+@router.get('/exams/{exam_id}')
+def exam_detail(exam_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from ..models import ExamRecord, ExamProblemResult
+    exam = db.query(ExamRecord).filter(ExamRecord.id == exam_id, ExamRecord.user_id == current_user.id).first()
+    if not exam:
+        raise HTTPException(status_code=404, detail='Exam not found')
+
+    results = db.query(ExamProblemResult).filter(ExamProblemResult.exam_id == exam.id).all()
+    
+    # Apply natural sorting by problem number (handles "1", "10", "2" → "1", "2", "10")
+    def _natural_sort_key_query(result):
+        num_str = str(result.problem_number).strip()
+        numbers = re.findall(r'\d+', num_str)
+        return tuple(int(n) for n in numbers) if numbers else (0, hash(num_str))
+    
+    results = sorted(results, key=_natural_sort_key_query)
+
+    return {
+        'id': exam.id,
+        'paper_name': exam.paper_name,
+        'created_at': exam.created_at,
+        'ai_model': exam.ai_model,
+        'exam_type': exam.exam_type.value if exam.exam_type else 'custom',
+        'total_score': exam.total_score,
+        'status': exam.status,
+        'overall_feedback': exam.overall_feedback or exam.overall_evaluation,
+        'image_urls': [get_accessible_image_url(url) for url in (exam.image_urls or [])],
+        'results': [
+            {
+                'problem_number': r.problem_number,
+                'score': r.score,
+                'max_score': r.max_score,
+                'knowledge_tag': r.knowledge_tag,
+                'feedback': r.feedback,
+                'original_question_text': r.original_question_text,
+                'user_answer_text': r.user_answer_text
+            } for r in results
+        ]
+    }
+
 @router.delete("/solution-attempts/{attempt_id}")
 async def delete_solution_attempt(attempt_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     attempt = db.query(SolutionAttempt).filter(SolutionAttempt.id == attempt_id, SolutionAttempt.user_id == current_user.id).first()
@@ -1119,10 +1970,7 @@ async def delete_solution_attempt(attempt_id: int, db: Session = Depends(get_db)
     # Optional: Delete file from disk
     try:
         if attempt.image_path:
-            # Check if it's a relative path from UPLOAD_DIR
-            file_path = os.path.join(UPLOAD_DIR, attempt.image_path)
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            delete_uploaded_object(attempt.image_path)
     except Exception as e:
         print(f"Failed to delete file: {e}")
 
@@ -1141,8 +1989,16 @@ async def reanalyze_solution_attempt(attempt_id: int, db: Session = Depends(get_
     if not problem:
         raise HTTPException(status_code=404, detail="Problem not found")
 
-    file_location = os.path.join(UPLOAD_DIR, attempt.image_path)
-    if not os.path.exists(file_location):
+    file_location = attempt.image_path
+    if file_location and not (
+        file_location.startswith("s3://")
+        or file_location.startswith("http://")
+        or file_location.startswith("https://")
+        or os.path.isabs(file_location)
+    ):
+        file_location = os.path.join(UPLOAD_DIR, file_location)
+
+    if not file_location:
         raise HTTPException(status_code=404, detail="Original image file not found on server")
 
     # Prepare context for AI
@@ -1157,7 +2013,7 @@ async def reanalyze_solution_attempt(attempt_id: int, db: Session = Depends(get_
 
     # Call AI
     try:
-        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem.id)
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem.id, user_id=current_user.id)
         feedback = ai_response["feedback_json"]
         used_model = ai_response["ai_model"]
     except AIServiceException as e:
@@ -1178,6 +2034,7 @@ async def reanalyze_solution_attempt(attempt_id: int, db: Session = Depends(get_
     attempt.ai_evaluation = feedback
     db.commit()
     db.refresh(attempt)
+    attempt.image_path = get_accessible_image_url(attempt.image_path)
     
     return attempt
 
@@ -1859,18 +2716,14 @@ async def submit_full_paper(
         raise HTTPException(status_code=400, detail="该会话没有试卷快照，请先调用 generate_paper")
 
     # 1. Save uploaded images
-    upload_dir = f"uploads/assessments/{session_id}"
-    os.makedirs(upload_dir, exist_ok=True)
-
     image_paths = []
+    paper_image_urls = []
     for i, file in enumerate(files):
-        if not file.content_type.startswith("image/"):
+        if not file.content_type or not file.content_type.startswith("image/"):
             continue
-        suffix = os.path.splitext(file.filename)[1] or ".jpg"
-        save_path = os.path.join(upload_dir, f"answer_{i+1}{suffix}")
-        with open(save_path, "wb") as f:
-            f.write(await file.read())
-        image_paths.append(save_path)
+        saved_upload = upload_to_s3(file, prefix=f"assessments/{session_id}")
+        image_paths.append(saved_upload.s3_uri)
+        paper_image_urls.append(saved_upload.public_url)
 
     if not image_paths:
         raise HTTPException(status_code=400, detail="请至少上传一张答卷图片")
@@ -1881,7 +2734,11 @@ async def submit_full_paper(
         grading_result = await ai_service.grade_full_paper(
             paper_snapshot=session.paper_snapshot,
             image_paths=image_paths,
-            session_id=session_id
+            session_id=session_id,
+            user_id=current_user.id,
+            exam_type="DIAGNOSTIC",
+            exam_mode="combined",
+            weight_applied=1.0
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI 批改失败: {str(e)}")
@@ -1896,7 +2753,7 @@ async def submit_full_paper(
     session.graded_problems = graded
     session.report_markdown = grading_result.get("comprehensive_report", "")
     session.formatting_feedback = grading_result.get("formatting_feedback", "")
-    session.paper_image_paths = image_paths
+    session.paper_image_paths = paper_image_urls
     session.overall_score = overall_pct
     session.status = "completed"
     session.completed_at = dt.utcnow()
@@ -2153,9 +3010,6 @@ async def submit_assessment_problem(
     current_user: User = Depends(get_current_user)
 ):
     from ..models import AssessmentSession, AssessmentProblem, Problem
-    import shutil
-    import uuid
-    import time
     
     # Verify session and problem
     session = db.query(AssessmentSession).filter(
@@ -2177,14 +3031,7 @@ async def submit_assessment_problem(
         
     problem = db.query(Problem).filter(Problem.id == problem_id).first()
         
-    # Save Image
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    file_ext = os.path.splitext(file.filename)[1]
-    filename = f"assess_{session_id}_{problem_id}_{uuid.uuid4().hex[:8]}_{int(time.time())}{file_ext}"
-    file_location = os.path.join(UPLOAD_DIR, filename)
-
-    with open(file_location, "wb+") as file_object:
-        shutil.copyfileobj(file.file, file_object)
+    saved_upload = upload_to_s3(file, prefix=f"assessments/{session_id}/problems/{problem_id}")
         
     # Get Standard Solution for AI compare
     problem_latex = problem.latex_content or "N/A"
@@ -2197,7 +3044,7 @@ async def submit_assessment_problem(
 
     # Call AI Grader
     try:
-        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem.id)
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, saved_upload.s3_uri, target_id=problem.id, user_id=current_user.id)
         feedback = ai_response["feedback_json"]
         score = feedback.get("score", 0)
     except AIServiceException as e:
@@ -2211,7 +3058,7 @@ async def submit_assessment_problem(
         score = 0
         
     # Update DB
-    ap.image_path = filename
+    ap.image_path = saved_upload.public_url
     ap.ai_score = float(score)
     ap.ai_feedback = feedback
     ap.is_submitted = True

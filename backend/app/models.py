@@ -14,6 +14,13 @@ class ProblemStatus(enum.Enum):
     WRONG = "wrong"
     PENDING = "pending"
 
+class ExamType(enum.Enum):
+    """Exam type enumeration for weighted grading logic"""
+    CUSTOM = "custom"           # 日常练习 (Routine Practice)
+    DIAGNOSTIC = "diagnostic"   # 摸底评测 (Diagnostic Assessment)
+    MIDTERM = "midterm"         # 期中评测 (Midterm Exam)
+    FINAL = "final"             # 期末评测 (Final Exam)
+
 class User(Base):
     __tablename__ = "users"
     
@@ -151,6 +158,7 @@ class UserKnowledgeMastery(Base):
     user_self_rating = Column(Float, nullable=True) # 1=Won't, 2=Half, 3=Mastered
     ai_assessed_rating = Column(Float, nullable=True) # AI Objective Score 1-10
     comprehensive_score = Column(Float, nullable=True) # Computed score
+    total_weight = Column(Float, default=0.0) # Accumulated weight sum from historical exams
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", backref="knowledge_mastery_records")
@@ -259,6 +267,7 @@ class ExamRecord(Base):
     __tablename__ = "exam_records"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    exam_type = Column(SAEnum(ExamType), default=ExamType.CUSTOM, nullable=False) # custom, diagnostic, midterm, final
     status = Column(String(50), default="processing") # processing, completed, failed
     total_score = Column(Float, nullable=True)
     overall_evaluation = Column(Text, nullable=True)
@@ -289,3 +298,14 @@ class ExamProblemResult(Base):
     user_answer_text = Column(Text, nullable=True)
     
     exam = relationship("ExamRecord", back_populates="results")
+
+class OperationLog(Base):
+    """业务运行日志表 - 记录核心业务操作（单题/整卷批阅等）"""
+    __tablename__ = "operation_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    action_type = Column(String(100), nullable=False, index=True)  # e.g. "单题智能批阅", "整卷智能批阅"
+    status = Column(String(20), nullable=False, default="success")  # success, failed
+    details = Column(JSON, nullable=True)  # Flexible payload: model_used, cost_time_ms, exam_type, weight_applied, etc.
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)

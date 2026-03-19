@@ -11,6 +11,7 @@ export interface ExamProblemResult {
 }
 
 export interface ExamStatusResponse {
+  exam_id: number;  // 新增：试卷 ID
   id: number;
   status: 'processing' | 'completed' | 'failed';
   total_score?: number;
@@ -19,12 +20,33 @@ export interface ExamStatusResponse {
   results: ExamProblemResult[];
 }
 
+export interface DuplicateFoundResponse {
+  status: 'duplicate_found';
+  existing_exam_id: number;
+  title: string;
+}
+
+export interface UploadTaskResponse {
+  task_id: number;
+  status: string;
+}
+
 export function useExamPolling() {
-  const [files, setFiles] = useState<File[]>([]);
+  const getErrorMessage = (value: unknown, fallback: string): string => {
+    if (value instanceof Error && value.message) {
+      return value.message;
+    }
+    return fallback;
+  };
+
+  const [questionFiles, setQuestionFiles] = useState<File[]>([]);
+  const [answerFiles, setAnswerFiles] = useState<File[]>([]);
+  const [combinedFiles, setCombinedFiles] = useState<File[]>([]);
   const [isUploading, setIsUploading] = useState(false);
-  const [taskId, setTaskId] = useState<number | null>(null);
   const [statusResponse, setStatusResponse] = useState<ExamStatusResponse | null>(null);
+  const [duplicateResponse, setDuplicateResponse] = useState<DuplicateFoundResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [onCompletionCallback, setOnCompletionCallback] = useState<((examId: number) => void) | null>(null);
   
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -42,13 +64,21 @@ export function useExamPolling() {
         const data: ExamStatusResponse = await res.json();
         setStatusResponse(data);
         
-        if (data.status === 'completed' || data.status === 'failed') {
+        // 新增：当完成时，调用回调函数
+        if (data.status === 'completed' && onCompletionCallback) {
           if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
-          setIsUploading(false); // Done
+          setIsUploading(false);
+          // 延迟 100ms 确保状态更新完成后再回调
+          setTimeout(() => {
+            onCompletionCallback(data.exam_id);
+          }, 100);
+        } else if (data.status === 'failed') {
+          if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
+          setIsUploading(false);
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error("Polling error", err);
-        setError(err.message || 'Error checking status');
+        setError(getErrorMessage(err, 'Error checking status'));
         if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
         setIsUploading(false);
       }
@@ -57,20 +87,58 @@ export function useExamPolling() {
     // Poll every 3 seconds
     pollingIntervalRef.current = setInterval(poll, 3000);
     poll(); // immediate first call
-  }, []);
+  }, [onCompletionCallback]);
 
-  const uploadFiles = async (selectedFiles: File[]) => {
-    if (selectedFiles.length === 0) return;
+  const uploadFiles = async (
+    selectedQuestionFiles: File[], 
+    selectedAnswerFiles: File[], 
+    examMode: 'separated' | 'combined' = 'separated',
+    selectedCombinedFiles: File[] = [],
+    examType: 'custom' | 'diagnostic' | 'midterm' | 'final' = 'custom',
+    options?: {
+      forceRegrade?: boolean;
+      existingExamId?: number;
+    }
+  ) => {
+    if (examMode === 'separated' && (selectedQuestionFiles.length === 0 || selectedAnswerFiles.length === 0)) return;
+    if (examMode === 'combined' && selectedCombinedFiles.length === 0) return;
     
     setIsUploading(true);
     setError(null);
     setStatusResponse(null);
-    setTaskId(null);
+    setDuplicateResponse(null);
     
     const formData = new FormData();
-    selectedFiles.forEach(file => {
-      formData.append('files', file);
-    });
+    
+    // Add exam_mode parameter
+    formData.append('exam_mode', examMode);
+    
+    // Add exam_type parameter
+    formData.append('exam_type', examType);
+
+    if (options?.forceRegrade) {
+      formData.append('force_regrade', 'true');
+    }
+    if (options?.existingExamId !== undefined) {
+      formData.append('existing_exam_id', String(options.existingExamId));
+    }
+    
+    if (examMode === 'separated') {
+      // Add question images
+      selectedQuestionFiles.forEach(file => {
+        formData.append('question_images', file);
+      });
+      
+      // Add answer images
+      selectedAnswerFiles.forEach(file => {
+        formData.append('answer_images', file);
+      });
+    } else {
+      // Combined mode: all images go into combined_images
+      selectedCombinedFiles.forEach(file => {
+        formData.append('combined_images', file);
+      });
+    }
 
     try {
       const res = await fetchWithAuth('/api/exams/upload_and_grade', {
@@ -85,27 +153,46 @@ export function useExamPolling() {
       }
       
       const data = await res.json();
-      setTaskId(data.task_id);
+
+      if (data?.status === 'duplicate_found') {
+        setDuplicateResponse(data as DuplicateFoundResponse);
+        setIsUploading(false);
+        return data as DuplicateFoundResponse;
+      }
+
+      const taskResponse = data as UploadTaskResponse;
       
       // Start polling for this new task
-      startPolling(data.task_id);
+      startPolling(taskResponse.task_id);
+      return taskResponse;
       
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error("Upload error", err);
-      setError(err.message || "Failed to upload files");
+      setError(getErrorMessage(err, "Failed to upload files"));
       setIsUploading(false);
+      return null;
     }
   };
 
-  const handleFilesChange = (newFiles: File[]) => {
-    setFiles(newFiles);
+  const handleQuestionFilesChange = (newFiles: File[]) => {
+    setQuestionFiles(newFiles);
+  };
+
+  const handleAnswerFilesChange = (newFiles: File[]) => {
+    setAnswerFiles(newFiles);
+  };
+
+  const handleCombinedFilesChange = (newFiles: File[]) => {
+    setCombinedFiles(newFiles);
   };
   
   const reset = () => {
-    setFiles([]);
+    setQuestionFiles([]);
+    setAnswerFiles([]);
+    setCombinedFiles([]);
     setIsUploading(false);
-    setTaskId(null);
     setStatusResponse(null);
+    setDuplicateResponse(null);
     setError(null);
     if (pollingIntervalRef.current) {
       clearInterval(pollingIntervalRef.current);
@@ -113,12 +200,19 @@ export function useExamPolling() {
   };
 
   return {
-    files,
-    handleFilesChange,
+    questionFiles,
+    answerFiles,
+    combinedFiles,
+    handleQuestionFilesChange,
+    handleAnswerFilesChange,
+    handleCombinedFilesChange,
     uploadFiles,
     isUploading,
     statusResponse,
+    duplicateResponse,
     error,
-    reset
+    reset,
+    setDuplicateResponse,
+    setOnCompletionCallback  // 新增：设置完成回调的函数
   };
 }

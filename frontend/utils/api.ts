@@ -2,6 +2,28 @@ import { authHeader } from '../context/AuthContext';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
+export function resolveImageUrl(imagePath?: string | null): string {
+    if (!imagePath) return '';
+
+    if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
+        return imagePath;
+    }
+
+    const normalized = imagePath.replace(/\\/g, '/');
+
+    if (normalized.startsWith('/')) {
+        return `${API_URL}${normalized}`;
+    }
+
+    if (normalized.includes('/static/')) {
+        const idx = normalized.indexOf('/static/');
+        return `${API_URL}${normalized.slice(idx)}`;
+    }
+
+    const fileName = normalized.split('/').pop() || normalized;
+    return `${API_URL}/static/${fileName}`;
+}
+
 export async function fetchWithAuth(endpoint: string, options: RequestInit = {}) {
     const headers = {
         ...options.headers,

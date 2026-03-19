@@ -1,22 +1,14 @@
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from sqlalchemy.orm import Session
-import shutil
-import os
-import uuid
-from typing import Optional
 from ..database import get_db
 from ..models import Problem, DifficultyLevel, KnowledgeNode, User
 from ..auth_deps import get_current_user
 from ..services.ai_service import AIService, AIServiceException
+from ..services.upload_service import upload_to_s3
 from datetime import datetime
 
 router = APIRouter()
 ai_service = AIService()
-
-UPLOAD_DIR = "uploads"
-SCAN_DATA_DIR = "./backend/uploads"
-if not os.path.exists(SCAN_DATA_DIR):
-    os.makedirs(SCAN_DATA_DIR, exist_ok=True)
 
 @router.post("/upload")
 async def upload_file(
@@ -24,22 +16,16 @@ async def upload_file(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # 1. Generate unique filename
-    file_ext = file.filename.split(".")[-1] if "." in file.filename else "jpg"
-    unique_filename = f"{uuid.uuid4()}.{file_ext}"
-    file_path = os.path.join(SCAN_DATA_DIR, unique_filename)
-    
-    # 2. Save file
+    # 1. Upload to S3/MinIO
     try:
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        saved_upload = upload_to_s3(file, prefix="problems")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
     
     # 3. Call AI Service (Immediate processing)
     try:
         # Note: analyze_image is async
-        analysis_result = await ai_service.analyze_image(file_path)
+        analysis_result = await ai_service.analyze_image(saved_upload.s3_uri)
     except AIServiceException as e:
         status_code = 429 if e.error_type == "rate_limit" else 401 if e.error_type == "auth_error" else 503
         raise HTTPException(
@@ -73,7 +59,7 @@ async def upload_file(
 
     new_problem = Problem(
         user_id=current_user.id,
-        image_path=file_path,
+        image_path=saved_upload.public_url,
         latex_content=analysis_result.get("latex_content"),
         ai_analysis=ai_data,
         difficulty=analysis_result.get("difficulty", 1),

@@ -6,7 +6,8 @@ import { useRouter } from 'next/navigation';
 
 interface ModelConfig {
     MODEL_VISION_PRIMARY: string;
-    MODEL_TEACHING_PRIMARY: string;
+    MODEL_ROUTINE_TEACHING_PRIMARY: string;
+    MODEL_ADVANCED_ASSESSMENT_PRIMARY: string;
     MODEL_UTILITY_PRIMARY: string;
 }
 
@@ -16,7 +17,8 @@ export default function SettingsPage() {
     const [availableModels, setAvailableModels] = useState<string[]>([]);
     const [config, setConfig] = useState<ModelConfig>({
         MODEL_VISION_PRIMARY: '',
-        MODEL_TEACHING_PRIMARY: '',
+        MODEL_ROUTINE_TEACHING_PRIMARY: '',
+        MODEL_ADVANCED_ASSESSMENT_PRIMARY: '',
         MODEL_UTILITY_PRIMARY: ''
     });
     const [isLoading, setIsLoading] = useState(true);
@@ -98,9 +100,14 @@ export default function SettingsPage() {
             primaryKey: 'MODEL_VISION_PRIMARY' as keyof ModelConfig
         },
         {
-            title: '深度教学模型 (Teaching)',
-            desc: '用于作业批改和详细步骤推理',
-            primaryKey: 'MODEL_TEACHING_PRIMARY' as keyof ModelConfig
+            title: '日常批改模型 (Routine Teaching)',
+            desc: '用于日常错题练习与普通试卷批改（推荐 Flash 模型）',
+            primaryKey: 'MODEL_ROUTINE_TEACHING_PRIMARY' as keyof ModelConfig
+        },
+        {
+            title: '高阶评测模型 (Advanced Assessment)',
+            desc: '用于摸底定级、期中与期末考试等高权重场景，确保推导极度严谨（推荐 Pro 模型）',
+            primaryKey: 'MODEL_ADVANCED_ASSESSMENT_PRIMARY' as keyof ModelConfig
         },
         {
             title: '数据处理模型 (Utility)',

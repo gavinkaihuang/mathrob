@@ -10,7 +10,8 @@ router = APIRouter()
 # Pydantic models for request/response validation
 class ModelConfig(BaseModel):
     MODEL_VISION_PRIMARY: Optional[str] = None
-    MODEL_TEACHING_PRIMARY: Optional[str] = None
+    MODEL_ROUTINE_TEACHING_PRIMARY: Optional[str] = None
+    MODEL_ADVANCED_ASSESSMENT_PRIMARY: Optional[str] = None
     MODEL_UTILITY_PRIMARY: Optional[str] = None
 
 from sqlalchemy.orm import Session
@@ -82,13 +83,15 @@ async def get_available_models(db: Session = Depends(get_db)):
 async def get_model_config(db: Session = Depends(get_db)):
     """
     Reads the current model configuration from the database.
+    Maps database roles to new frontend field names.
     """
     configs = db.query(DBModelConfig).all()
     config_dict = {f"MODEL_{c.role.upper()}_PRIMARY": c.model_name for c in configs}
     
     return ModelConfig(
         MODEL_VISION_PRIMARY=config_dict.get("MODEL_VISION_PRIMARY", ""),
-        MODEL_TEACHING_PRIMARY=config_dict.get("MODEL_TEACHING_PRIMARY", ""),
+        MODEL_ROUTINE_TEACHING_PRIMARY=config_dict.get("MODEL_ROUTINE_TEACHING_PRIMARY", ""),
+        MODEL_ADVANCED_ASSESSMENT_PRIMARY=config_dict.get("MODEL_ADVANCED_ASSESSMENT_PRIMARY", ""),
         MODEL_UTILITY_PRIMARY=config_dict.get("MODEL_UTILITY_PRIMARY", "")
     )
 
@@ -96,12 +99,20 @@ async def get_model_config(db: Session = Depends(get_db)):
 async def update_model_config(config: ModelConfig, db: Session = Depends(get_db)):
     """
     Updates the model configuration in the database.
+    Maps new field names back to database roles.
+    
+    Field mappings:
+    - MODEL_VISION_PRIMARY -> role='vision'
+    - MODEL_ROUTINE_TEACHING_PRIMARY -> role='routine_teaching'
+    - MODEL_ADVANCED_ASSESSMENT_PRIMARY -> role='advanced_assessment'
+    - MODEL_UTILITY_PRIMARY -> role='utility'
     """
     try:
         # Map frontend format back to DB roles
         updates = {
             "vision": config.MODEL_VISION_PRIMARY,
-            "teaching": config.MODEL_TEACHING_PRIMARY,
+            "routine_teaching": config.MODEL_ROUTINE_TEACHING_PRIMARY,
+            "advanced_assessment": config.MODEL_ADVANCED_ASSESSMENT_PRIMARY,
             "utility": config.MODEL_UTILITY_PRIMARY
         }
         
