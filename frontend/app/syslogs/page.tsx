@@ -89,7 +89,7 @@ export default function SysLogsPage() {
     const renderOperationDetails = (actionType: string, details: any) => {
         if (!details) return null;
 
-        const badges: JSX.Element[] = [];
+        const badges: React.ReactNode[] = [];
         
         // 单题批阅 (单题智能批阅)
         if (actionType === '单题智能批阅') {
