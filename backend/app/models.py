@@ -298,3 +298,14 @@ class ExamProblemResult(Base):
     user_answer_text = Column(Text, nullable=True)
     
     exam = relationship("ExamRecord", back_populates="results")
+
+class OperationLog(Base):
+    """业务运行日志表 - 记录核心业务操作（单题/整卷批阅等）"""
+    __tablename__ = "operation_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    action_type = Column(String(100), nullable=False, index=True)  # e.g. "单题智能批阅", "整卷智能批阅"
+    status = Column(String(20), nullable=False, default="success")  # success, failed
+    details = Column(JSON, nullable=True)  # Flexible payload: model_used, cost_time_ms, exam_type, weight_applied, etc.
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)

@@ -598,7 +598,7 @@ async def submit_practice_solution(
             
     # Call AI Teaching Model to analyze the handwritten solution vs reference
     try:
-        feedback_data = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id)
+        feedback_data = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id, user_id=current_user.id)
         feedback = feedback_data["feedback_json"]
     except AIServiceException as e:
         status_code = 429 if e.error_type == "rate_limit" else 401 if e.error_type == "auth_error" else 503
@@ -646,7 +646,7 @@ async def submit_solution(
             
     # Call AI
     try:
-        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id)
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id, user_id=current_user.id)
         feedback = ai_response["feedback_json"]
         used_model = ai_response["ai_model"]
     except AIServiceException as e:
@@ -710,7 +710,7 @@ async def submit_homework(
             
     # Call AI
     try:
-        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id)
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem_id, user_id=current_user.id)
         feedback = ai_response["feedback_json"]
         used_model = ai_response["ai_model"]
     except AIServiceException as e:
@@ -1092,7 +1092,8 @@ async def process_full_exam(
     user_id: int, 
     question_image_paths: List[str], 
     answer_image_paths: List[str],
-    image_urls: List[str] = None
+    image_urls: List[str] = None,
+    exam_mode: str = "separated"
 ):
     """
     Two-Stage Exam Grading Pipeline with Image Separation & Dynamic Model Routing:
@@ -1100,31 +1101,47 @@ async def process_full_exam(
     Stage 2: Parallel batch grading (2-3 questions per batch using asyncio.gather)
     Stage 3: Result aggregation, weighted knowledge mastery update, and database persistence
     
+    CRITICAL: Database session is held ONLY during Stage 1 and Stage 3.
+    During Stage 2 (long-running AI calls), the DB session is closed to prevent:
+    - Connection timeouts from 5-10 minute AI requests
+    - Database resource exhaustion
+    - Firewall/proxy disconnection issues
+    
     Key Improvements:
     - Dynamically routes to appropriate teaching model based on exam_type
     - Implements weighted moving average for knowledge mastery calculation
     - Explicitly separates question images from answer images
+    - Lazy session pattern: DB connection only acquired when needed
     """
     from ..database import SessionLocal
-    from ..models import ExamRecord, ExamProblemResult, KnowledgeNode, UserKnowledgeMastery, SystemLog, ExamType
+    from ..models import ExamRecord, ExamProblemResult, KnowledgeNode, UserKnowledgeMastery, SystemLog, OperationLog, ExamType
     from ..main import ai_service
     from ..services.model_manager import model_manager
-    from ..services.knowledge_mastery_service import batch_update_knowledge_mastery
+    from ..services.knowledge_mastery_service import batch_update_knowledge_mastery, get_weight_for_exam_type
     
-    db = SessionLocal()
     pipeline_start_time = datetime.utcnow()
     selected_teaching_model = None  # Will be set based on exam_type
+    db = None  # Will be created when needed
+    standard_tags_list = []  # Fetch early, before AI calls
+    exam_type = None
+    all_problems = []
+    batch_models = []
+    mastery_update_summary = {}
     
     try:
         # ============================================================
-        # FETCH EXAM RECORD & DETERMINE TEACHING MODEL
+        # STAGE 1a: FETCH CONFIGURATION (Database only - quick)
+        # Close DB immediately after fetching config
         # ============================================================
+        db = SessionLocal()
+        print(f"[Exam {task_id}] Stage 1a: Fetching exam configuration...")
+        
+        # FETCH EXAM RECORD & DETERMINE TEACHING MODEL
         exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
         if not exam:
             raise ValueError(f"Exam record {task_id} not found")
         
-        exam_type: ExamType = exam.exam_type or ExamType.CUSTOM
-        
+        exam_type = exam.exam_type or ExamType.CUSTOM
         print(f"[Exam {task_id}] Exam Type: {exam_type.value}")
         
         # Get the appropriate teaching model based on exam type
@@ -1133,17 +1150,27 @@ async def process_full_exam(
             print(f"[Exam {task_id}] Selected Teaching Model: {selected_teaching_model}")
         except Exception as e:
             print(f"[Exam {task_id}] ⚠️ Failed to fetch exam_type-specific model: {e}")
-            print(f"[Exam {task_id}] Falling back to default AI service model")
-            selected_teaching_model = None  # Will use default ai_service model
+            selected_teaching_model = None
         
-        # Get standard knowledge tags
+        # Get standard knowledge tags (fetch into memory BEFORE closing db)
         nodes = db.query(KnowledgeNode).all()
         standard_tags_list = [n.name for n in nodes]
+        print(f"[Exam {task_id}] Fetched {len(standard_tags_list)} standard knowledge tags")
+        
+        # CLOSE DATABASE IMMEDIATELY after fetching config
+        # This prevents holding a connection during long AI calls
+        print(f"[Exam {task_id}] Closing DB session before Stage 1b (AI extraction)...")
+        try:
+            db.close()
+        except Exception as e:
+            print(f"[Exam {task_id}] Warning: Error closing DB after config fetch: {e}")
+        db = None
         
         # ============================================================
-        # STAGE 1: STRUCTURE EXTRACTION (Lightweight Index Building)
+        # STAGE 1b: STRUCTURE EXTRACTION (AI only - long-running)
+        # Database connection is closed, preventing connection pooling issues
         # ============================================================
-        print(f"[Exam {task_id}] Stage 1: Extracting exam structure from {len(answer_image_paths)} answer images...")
+        print(f"[Exam {task_id}] Stage 1b: Extracting exam structure from {len(answer_image_paths)} answer images...")
         
         structure = await _extract_exam_structure(
             answer_image_paths=answer_image_paths,
@@ -1153,12 +1180,18 @@ async def process_full_exam(
         question_numbers = structure['question_numbers']
         paper_title = structure['paper_title']
         
-        print(f"[Exam {task_id}] Stage 1 Complete: Found {len(question_numbers)} questions: {question_numbers}")
+        print(f"[Exam {task_id}] Stage 1b Complete: Found {len(question_numbers)} questions: {question_numbers}")
         
         if not question_numbers:
             raise ValueError("No questions detected in exam. OCR may have failed.")
         
-        # Log Stage 1 completion
+        # ============================================================
+        # Stage 1c: LOG EXTRACTION (Database only - post-AI)
+        # Re-acquire DB session to log Stage 1 results
+        # ============================================================
+        print(f"[Exam {task_id}] Stage 1c: Re-acquiring DB session to log Stage 1 completion...")
+        db = SessionLocal()
+        
         log_s1 = SystemLog(
             level="INFO",
             category="teaching",
@@ -1170,8 +1203,45 @@ async def process_full_exam(
                 "model_used": structure['model']
             }
         )
-        db.add(log_s1)
-        db.commit()
+        
+        # Attempt to commit with retry logic
+        try:
+            db.add(log_s1)
+            db.commit()
+            print(f"[Exam {task_id}] Stage 1 log saved successfully")
+        except Exception as commit_error:
+            print(f"[Exam {task_id}] ⚠️ Stage 1 commit failed: {commit_error}")
+            try:
+                db.rollback()
+            except:
+                pass
+            # Reconnect and retry once
+            print(f"[Exam {task_id}] Attempting to reconnect and retry...")
+            try:
+                db.close()
+            except:
+                pass
+            db = SessionLocal()
+            try:
+                db.add(log_s1)
+                db.commit()
+                print(f"[Exam {task_id}] Stage 1 log saved successfully (after reconnect)")
+            except Exception as retry_error:
+                print(f"[Exam {task_id}] ⚠️ Stage 1 log save failed even after reconnect: {retry_error}")
+                # Continue without logging - don't fail the entire pipeline
+        
+        # CLOSE DATABASE SESSION BEFORE STAGE 2
+        # Stage 2 involves long-running AI calls (5-10 minutes)
+        # Holding the DB connection open during this time risks:
+        # - Connection timeouts and firewall disconnects
+        # - Database resource exhaustion
+        # Pattern: Lazy session - only hold connection when needed
+        print(f"[Exam {task_id}] Closing DB session before Stage 2 to prevent long-held connections...")
+        try:
+            db.close()
+        except Exception as e:
+            print(f"[Exam {task_id}] Warning: Error closing DB after Stage 1: {e}")
+        db = None  # Signal that session is closed
         
         # ============================================================
         # STAGE 2: PARALLEL BATCH GRADING (Chunked Processing)
@@ -1185,21 +1255,26 @@ async def process_full_exam(
         
         print(f"[Exam {task_id}] Stage 2: Processing {len(batches)} batches with asyncio.gather...")
         
-        # Create concurrent grading tasks
-        batch_tasks = [
-            _grade_exam_batch(
-                batch_numbers=batch,
-                question_image_paths=question_image_paths,
-                answer_image_paths=answer_image_paths,
-                standard_tags_list=standard_tags_list,
-                ai_service=ai_service,
-                batch_index=idx,
-                total_batches=len(batches)
-            )
-            for idx, batch in enumerate(batches)
-        ]
+        # Limit concurrent AI calls to prevent connection pool exhaustion.
+        # Each call_gemini_with_fallback briefly opens a DB session to fetch model/token
+        # config; without a semaphore, all batches race at once and can saturate the pool.
+        _batch_semaphore = asyncio.Semaphore(5)
+
+        async def _bounded_batch(batch, idx):
+            async with _batch_semaphore:
+                return await _grade_exam_batch(
+                    batch_numbers=batch,
+                    question_image_paths=question_image_paths,
+                    answer_image_paths=answer_image_paths,
+                    standard_tags_list=standard_tags_list,
+                    ai_service=ai_service,
+                    batch_index=idx,
+                    total_batches=len(batches)
+                )
+
+        batch_tasks = [_bounded_batch(batch, idx) for idx, batch in enumerate(batches)]
         
-        # Execute all batches concurrently
+        # Execute all batches concurrently (max 5 at a time)
         batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
         
         # Check for errors
@@ -1218,7 +1293,30 @@ async def process_full_exam(
         
         print(f"[Exam {task_id}] Stage 2 Complete: Total {len(all_problems)} problems graded")
         
-        # Log Stage 2 completion
+        # DO NOT log Stage 2 yet - wait until DB session is re-acquired in Stage 3
+        # This keeps DB connection closed during the longest AI processing phase
+        
+        # ============================================================
+        # STAGE 3: RESULT AGGREGATION & DATABASE PERSISTENCE
+        # Re-acquire DB session for persistence operations only
+        # ============================================================
+        # All batch AI calls are done. Generate overall feedback BEFORE opening DB
+        # so we don't hold a connection during another 1-3 min AI call.
+        # Calculate total score first (needed by _generate_overall_feedback).
+        total_score = sum(p.get('score', 0) for p in all_problems)
+        print(f"[Exam {task_id}] Stage 3: Generating overall feedback (before DB open)...")
+        overall_feedback = await _generate_overall_feedback(
+            all_problems=all_problems,
+            paper_title=paper_title,
+            total_score=total_score,
+            ai_service=ai_service
+        )
+        
+        # All AI calls are now complete. Re-acquire DB connection for data persistence.
+        db = SessionLocal()
+        print(f"[Exam {task_id}] Stage 3: Re-acquired DB session for persistence layer")
+        
+        # Now log Stage 2 completion
         log_s2 = SystemLog(
             level="INFO",
             category="teaching",
@@ -1231,8 +1329,16 @@ async def process_full_exam(
                 "models_used": list(set(batch_models))
             }
         )
-        db.add(log_s2)
-        db.commit()
+        try:
+            db.add(log_s2)
+            db.commit()
+        except Exception as e:
+            print(f"[Exam {task_id}] ⚠️ Stage 2 log commit failed: {e}")
+            try:
+                db.rollback()
+            except:
+                pass
+            # Don't fail the pipeline for logging errors
         
         # ============================================================
         # APPLY NATURAL SORTING TO ALL PROBLEMS
@@ -1247,9 +1353,7 @@ async def process_full_exam(
         sorted_problem_numbers = [str(p.get('problem_number', '?')) for p in all_problems]
         print(f"[Exam {task_id}] Problem order after sorting: {sorted_problem_numbers}")
         
-        # ============================================================
-        # STAGE 3: RESULT AGGREGATION & DATABASE PERSISTENCE
-        # ============================================================
+        # Persist exam record and results
         print(f"[Exam {task_id}] Stage 3: Aggregating results and saving to database...")
         
         exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
@@ -1260,21 +1364,11 @@ async def process_full_exam(
         exam.paper_name = paper_title
         exam.image_urls = image_urls
         
-        # Calculate total score
-        total_score = sum(p.get('score', 0) for p in all_problems)
+        # total_score and overall_feedback were computed before DB open (no AI call while holding connection)
         exam.total_score = total_score
         
         # Use the first batch model or the latest
         exam.ai_model = batch_models[0] if batch_models else "unknown"
-        
-        # Generate overall feedback
-        print(f"[Exam {task_id}] Generating overall feedback...")
-        overall_feedback = await _generate_overall_feedback(
-            all_problems=all_problems,
-            paper_title=paper_title,
-            total_score=total_score,
-            ai_service=ai_service
-        )
         
         exam.overall_feedback = overall_feedback
         exam.overall_evaluation = f"Graded via two-stage pipeline on {datetime.utcnow().isoformat()}"
@@ -1287,32 +1381,43 @@ async def process_full_exam(
         else:
             exam.ai_model = batch_models[0] if batch_models else "unknown"
         
-        # Save all problems to database
-        problem_save_count = 0
+        # Build all problem objects in memory, then bulk-insert in one call.
+        # This avoids N round-trips to Postgres (one per problem) and dramatically
+        # reduces the time the DB session is held open.
+        problem_objects = []
         for p in all_problems:
             if not p.get('problem_number'):
                 continue
-                
-            tag = p.get("knowledge_tag", "未知")
-            score = p.get("score", 0)
-            max_score = p.get("max_score", 10)
-            
-            # Save problem result
-            prob_res = ExamProblemResult(
+            problem_objects.append(ExamProblemResult(
                 exam_id=exam.id,
                 problem_number=str(p.get("problem_number", "未知")),
-                score=score,
-                max_score=max_score,
-                knowledge_tag=tag,
+                score=p.get("score", 0),
+                max_score=p.get("max_score", 10),
+                knowledge_tag=p.get("knowledge_tag", "未知"),
                 feedback=p.get("feedback", ""),
                 original_question_text=p.get("original_question_text", None),
                 user_answer_text=p.get("user_answer_text", None)
-            )
-            db.add(prob_res)
-            problem_save_count += 1
+            ))
+        problem_save_count = len(problem_objects)
         
-        # Flush problem results first
-        db.flush()
+        # Flush problem results (single bulk operation)
+        try:
+            db.bulk_save_objects(problem_objects)
+            db.flush()
+        except Exception as flush_error:
+            print(f"[Exam {task_id}] ⚠️ Bulk flush error (connection may have been dropped): {flush_error}")
+            try:
+                db.rollback()
+            except:
+                pass
+            try:
+                db.close()
+            except:
+                pass
+            db = SessionLocal()
+            print(f"[Exam {task_id}] Reconnected after flush error, retrying bulk insert")
+            db.bulk_save_objects(problem_objects)
+            db.flush()
         
         # Batch update knowledge mastery using weighted algorithm
         print(f"[Exam {task_id}] Stage 3: Updating knowledge mastery with weighted algorithm...")
@@ -1328,9 +1433,44 @@ async def process_full_exam(
         if mastery_update_summary['skipped']:
             print(f"[Exam {task_id}] Skipped knowledge points: {mastery_update_summary['skipped']}")
         
-        db.commit()
+        # Final commit with error handling
+        try:
+            db.commit()
+        except Exception as commit_error:
+            print(f"[Exam {task_id}] ⚠️ Final commit failed: {commit_error}")
+            try:
+                db.rollback()
+            except:
+                pass
+            # Re-raise to trigger the except block for error logging
+            raise
         
         pipeline_duration = (datetime.utcnow() - pipeline_start_time).total_seconds()
+
+        # Business operation log (frontend-facing): write with short-lived session only.
+        # Do NOT reuse the long-lived pipeline DB session to avoid pool pressure.
+        operation_details = {
+            "exam_id": task_id,
+            "exam_type": exam_type.value if exam_type else "custom",
+            "exam_mode": exam_mode,
+            "model_used": selected_teaching_model or (batch_models[0] if batch_models else "unknown"),
+            "weight_applied": mastery_update_summary.get("exam_weight", 1.0),
+            "total_problems": len(all_problems),
+            "cost_time_ms": round(pipeline_duration * 1000, 2)
+        }
+        try:
+            with SessionLocal() as op_db:
+                op_log = OperationLog(
+                    user_id=user_id,
+                    action_type="整卷智能批阅",
+                    status="success",
+                    details=operation_details,
+                    created_at=datetime.utcnow()
+                )
+                op_db.add(op_log)
+                op_db.commit()
+        except Exception as op_log_error:
+            print(f"[Exam {task_id}] ⚠️ Failed to write operation log: {op_log_error}")
         
         # Final log
         log_s3 = SystemLog(
@@ -1359,8 +1499,49 @@ async def process_full_exam(
         print(f"[Exam {task_id}] ❌ Pipeline failed: {e}")
         import traceback
         traceback.print_exc()
-        
+
+        pipeline_duration = (datetime.utcnow() - pipeline_start_time).total_seconds()
         try:
+            if exam_type:
+                failure_weight_applied = get_weight_for_exam_type(exam_type)
+            else:
+                failure_weight_applied = 1.0
+        except Exception:
+            failure_weight_applied = 1.0
+
+        failed_operation_details = {
+            "exam_id": task_id,
+            "exam_type": exam_type.value if exam_type else "custom",
+            "exam_mode": exam_mode,
+            "model_used": selected_teaching_model or (batch_models[0] if batch_models else "unknown"),
+            "weight_applied": failure_weight_applied,
+            "total_problems": len(all_problems),
+            "cost_time_ms": round(pipeline_duration * 1000, 2),
+            "error": str(e)
+        }
+
+        # Business operation log for failure (frontend-facing) with short-lived session
+        try:
+            with SessionLocal() as op_db:
+                op_log = OperationLog(
+                    user_id=user_id,
+                    action_type="整卷智能批阅",
+                    status="failed",
+                    details=failed_operation_details,
+                    created_at=datetime.utcnow()
+                )
+                op_db.add(op_log)
+                op_db.commit()
+        except Exception as op_log_error:
+            print(f"[Exam {task_id}] ⚠️ Failed to write failed operation log: {op_log_error}")
+        
+        # Try to update exam status and log error
+        # Note: db session may be None if error occurred during Stage 2 (AI calls)
+        try:
+            if db is None:
+                print(f"[Exam {task_id}] DB session was None during error - creating new session for error logging")
+                db = SessionLocal()
+            
             exam = db.query(ExamRecord).filter(ExamRecord.id == task_id).first()
             if exam:
                 exam.status = "failed"
@@ -1375,11 +1556,21 @@ async def process_full_exam(
             )
             db.add(error_log)
             db.commit()
-        except:
-            db.rollback()
+        except Exception as db_error:
+            print(f"[Exam {task_id}] Error updating exam status: {db_error}")
+            try:
+                if db:
+                    db.rollback()
+            except:
+                pass
     
     finally:
-        db.close()
+        try:
+            if db:
+                db.close()
+                print(f"[Exam {task_id}] DB session closed successfully")
+        except Exception as cleanup_error:
+            print(f"[Exam {task_id}] Error closing DB session: {cleanup_error}")
 
 
 @router.post("/exams/upload_and_grade")
@@ -1492,7 +1683,8 @@ async def upload_and_grade_exam(
         user_id=current_user.id, 
         question_image_paths=question_image_paths,
         answer_image_paths=answer_image_paths,
-        image_urls=all_image_urls
+        image_urls=all_image_urls,
+        exam_mode=exam_mode
     )
     
     return {"task_id": exam_record.id, "status": exam_record.status}
@@ -1518,17 +1710,29 @@ def exams_history(db: Session = Depends(get_db), current_user: User = Depends(ge
 @router.get("/exams/task_status/{task_id}")
 def get_exam_status(task_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from ..models import ExamRecord, ExamProblemResult
+    from ..database import db_retry, engine
+    from sqlalchemy.exc import OperationalError
     
-    exam = db.query(ExamRecord).filter(
-        ExamRecord.id == task_id,
-        ExamRecord.user_id == current_user.id
-    ).first()
+    # Wrap all DB operations with retry to handle transient connection drops
+    # This endpoint is polled every 3-5 seconds during long exam processing
+    try:
+        @db_retry
+        def _fetch_exam():
+            return db.query(ExamRecord).filter(
+                ExamRecord.id == task_id,
+                ExamRecord.user_id == current_user.id
+            ).first()
+        
+        exam = _fetch_exam()
+    except OperationalError:
+        engine.dispose()
+        raise HTTPException(status_code=503, detail="Database connection temporarily unavailable, please retry")
     
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
         
     response = {
-        "exam_id": exam.id,  # 新增：明确返回试卷 ID
+        "exam_id": exam.id,
         "id": exam.id,
         "status": exam.status,
         "total_score": exam.total_score,
@@ -1539,7 +1743,16 @@ def get_exam_status(task_id: int, db: Session = Depends(get_db), current_user: U
     }
     
     if exam.status == "completed":
-        results = db.query(ExamProblemResult).filter(ExamProblemResult.exam_id == exam.id).all()
+        try:
+            @db_retry
+            def _fetch_results():
+                return db.query(ExamProblemResult).filter(ExamProblemResult.exam_id == exam.id).all()
+            
+            results = _fetch_results()
+        except OperationalError:
+            engine.dispose()
+            raise HTTPException(status_code=503, detail="Database connection temporarily unavailable, please retry")
+        
         response["results"] = [
             {
                 "problem_number": r.problem_number,
@@ -1642,7 +1855,7 @@ async def reanalyze_solution_attempt(attempt_id: int, db: Session = Depends(get_
 
     # Call AI
     try:
-        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem.id)
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem.id, user_id=current_user.id)
         feedback = ai_response["feedback_json"]
         used_model = ai_response["ai_model"]
     except AIServiceException as e:
@@ -2366,7 +2579,11 @@ async def submit_full_paper(
         grading_result = await ai_service.grade_full_paper(
             paper_snapshot=session.paper_snapshot,
             image_paths=image_paths,
-            session_id=session_id
+            session_id=session_id,
+            user_id=current_user.id,
+            exam_type="DIAGNOSTIC",
+            exam_mode="combined",
+            weight_applied=1.0
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI 批改失败: {str(e)}")
@@ -2682,7 +2899,7 @@ async def submit_assessment_problem(
 
     # Call AI Grader
     try:
-        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem.id)
+        ai_response = await ai_service.analyze_solution(problem_latex, standard_solution, file_location, target_id=problem.id, user_id=current_user.id)
         feedback = ai_response["feedback_json"]
         score = feedback.get("score", 0)
     except AIServiceException as e:

@@ -6,6 +6,8 @@ import json
 import re
 import glob
 from google.api_core import exceptions as google_exceptions
+from datetime import datetime
+import time
 
 load_dotenv()
 
@@ -13,7 +15,7 @@ from pydantic import BaseModel, ValidationError
 from typing import List, Dict, Any, Optional
 import traceback
 from ..database import SessionLocal
-from ..models import SystemLog, APICallLog
+from ..models import SystemLog, APICallLog, OperationLog
 from .token_manager import token_manager
 
 class AIAnalysisResponse(BaseModel):
@@ -67,6 +69,23 @@ class AIService:
         except Exception as e:
             print(f"Failed to write to api_call_logs: {e}")
 
+    def _log_operation(self, action_type: str, status: str, details: dict = None, user_id: int = None):
+        """Records a business operation (单题批阅、整卷批阅, etc)."""
+        try:
+            db = SessionLocal()
+            log_entry = OperationLog(
+                action_type=action_type,
+                status=status,
+                details=details,
+                user_id=user_id
+            )
+            db.add(log_entry)
+            db.commit()
+            db.close()
+            print(f"[OPERATION_LOG] Recorded {action_type}: {status}")
+        except Exception as e:
+            print(f"Failed to write to operation_logs: {e}")
+
     async def call_gemini_with_fallback(self, category: str, prompt_or_content, image_path: str = None, image_paths: List[str] = None) -> tuple[str, str, str]:
         """
         Routes request to the appropriate model based on configuration in the DB.
@@ -79,119 +98,149 @@ class AIService:
         max_token_retries = 3 
         token_retry_count = 0
         model_name = "unknown"
+        db_session = None
         
-        while token_retry_count < max_token_retries:
+        try:
             db_session = SessionLocal()
-            try:
-                # Resolve active model from DB cache
-                model_name = model_manager.get_model_name(db_session, category)
-                
-                # Retrieve active API Token
-                current_token_record = token_manager.get_available_token(db_session)
-                current_token = current_token_record.api_key
-                token_id = current_token_record.id
-                token_name = current_token_record.name
-                
-                # Configure module for this API call
-                genai.configure(api_key=current_token)
-                
-                print(f"[{category.upper()}] Calling model: {model_name} with Token {token_name} (Attempt {token_retry_count + 1})")
-                model = genai.GenerativeModel(model_name)
-                
-                generation_config = {"response_mime_type": "application/json"}
+            
+            while token_retry_count < max_token_retries:
+                try:
+                    # Resolve active model from DB cache
+                    model_name = model_manager.get_model_name(db_session, category)
+                    
+                    # Retrieve active API Token
+                    current_token_record = token_manager.get_available_token(db_session)
+                    current_token = current_token_record.api_key
+                    token_id = current_token_record.id
+                    token_name = current_token_record.name
+                    
+                    # Configure module for this API call
+                    genai.configure(api_key=current_token)
+                    
+                    # *** CRITICAL: Close DB session BEFORE long AI call ***
+                    # fetch model + token data into locals, release connection immediately.
+                    # Each batch grading task holds a connection for 1-3 min otherwise,
+                    # and with 7 concurrent batches this exhausts the entire connection pool.
+                    try:
+                        db_session.close()
+                    except Exception:
+                        pass
+                    db_session = None  # signal: connection returned to pool
+                    
+                    print(f"[{category.upper()}] Calling model: {model_name} with Token {token_name} (Attempt {token_retry_count + 1})")
+                    model = genai.GenerativeModel(model_name)
+                    
+                    generation_config = {"response_mime_type": "application/json"}
 
-                # `prompt_or_content` may be a string prompt or a pre-built list of content parts (prompt + images)
-                if isinstance(prompt_or_content, list):
-                    content = prompt_or_content.copy()
-                else:
-                    content = [prompt_or_content]
+                    # `prompt_or_content` may be a string prompt or a pre-built list of content parts (prompt + images)
+                    if isinstance(prompt_or_content, list):
+                        content = prompt_or_content.copy()
+                    else:
+                        content = [prompt_or_content]
 
-                # Support single image path or multiple image paths
-                if image_paths:
-                    for ip in image_paths:
+                    # Support single image path or multiple image paths
+                    if image_paths:
+                        for ip in image_paths:
+                            try:
+                                img = PIL.Image.open(ip)
+                                content.append(img)
+                            except Exception as e:
+                                print(f"Warning: failed to open image {ip}: {e}")
+                    elif image_path:
                         try:
-                            img = PIL.Image.open(ip)
+                            img = PIL.Image.open(image_path)
                             content.append(img)
                         except Exception as e:
-                            print(f"Warning: failed to open image {ip}: {e}")
-                elif image_path:
+                            print(f"Warning: failed to open image {image_path}: {e}")
+                    
+                    # Use async generation
+                    response = await model.generate_content_async(
+                        content,
+                        generation_config=generation_config
+                    )
+                    # db_session will be closed in finally block
+                    return response.text, model_name, token_name
+                    
+                except google_exceptions.ResourceExhausted as e:
+                    # 429 - Rate limit / Quota exceeded
+                    print(f"[WARNING] 触发限频或配额耗尽 (Token: {token_name}): {e}")
+                    # Re-open a short-lived session just for error reporting
                     try:
-                        img = PIL.Image.open(image_path)
-                        content.append(img)
-                    except Exception as e:
-                        print(f"Warning: failed to open image {image_path}: {e}")
-                
-                # Use async generation
-                response = await model.generate_content_async(
-                    content,
-                    generation_config=generation_config
-                )
-                
-                db_session.close()
-                return response.text, model_name, token_name
-                
-            except google_exceptions.ResourceExhausted as e:
-                # 429 - Rate limit / Quota exceeded
-                print(f"[WARNING] 触发限频或配额耗尽 (Token: {token_name}): {e}")
-                token_manager.report_token_error(db_session, token_id, token_name, str(e))
-                token_retry_count += 1
-                db_session.close()
-                continue
-                
-            except (google_exceptions.ServiceUnavailable, google_exceptions.InternalServerError, google_exceptions.DeadlineExceeded) as e:
-                # 5xx or transient timeout - Cooldown and retry
-                print(f"[WARNING] 服务暂时不可用 (Token: {token_name}): {e}")
-                token_manager.report_token_error(db_session, token_id, token_name, str(e))
-                token_retry_count += 1
-                db_session.close()
-                continue
-                
-            except (google_exceptions.NotFound, google_exceptions.InvalidArgument) as e:
-                # 404 or 400 - Model name typo or invalid param
-                # CRITICAL: Do NOT put token in cooldown, stop retrying immediately.
-                print(f"[CRITICAL] 模型配置错误！请检查 ModelConfig 表中的 model_name. Error: {e}")
-                db_session.close()
-                raise AIServiceException(f"模型配置错误，请检查模型名称: {str(e)}", "config_error")
-                
-            except (google_exceptions.Unauthenticated, google_exceptions.PermissionDenied) as e:
-                # 401 or 403 - Auth issues
-                print(f"[CRITICAL] API 认证失败 (Token: {token_name}): {e}")
-                db_session.close()
-                raise AIServiceException(f"API 密钥无效或无权访问模型: {str(e)}", "auth_error")
+                        with SessionLocal() as _err_db:
+                            token_manager.report_token_error(_err_db, token_id, token_name, str(e))
+                    except Exception:
+                        pass
+                    token_retry_count += 1
+                    # Re-acquire db_session for next retry's model/token lookup
+                    db_session = SessionLocal()
+                    continue
+                    
+                except (google_exceptions.ServiceUnavailable, google_exceptions.InternalServerError, google_exceptions.DeadlineExceeded) as e:
+                    # 5xx or transient timeout - Cooldown and retry
+                    print(f"[WARNING] 服务暂时不可用 (Token: {token_name}): {e}")
+                    try:
+                        with SessionLocal() as _err_db:
+                            token_manager.report_token_error(_err_db, token_id, token_name, str(e))
+                    except Exception:
+                        pass
+                    token_retry_count += 1
+                    # Re-acquire db_session for next retry's model/token lookup
+                    db_session = SessionLocal()
+                    continue
+                    
+                except (google_exceptions.NotFound, google_exceptions.InvalidArgument) as e:
+                    # 404 or 400 - Model name typo or invalid param
+                    # CRITICAL: Do NOT put token in cooldown, stop retrying immediately.
+                    print(f"[CRITICAL] 模型配置错误！请检查 ModelConfig 表中的 model_name. Error: {e}")
+                    # db_session will be closed in finally block
+                    raise AIServiceException(f"模型配置错误，请检查模型名称: {str(e)}", "config_error")
+                    
+                except (google_exceptions.Unauthenticated, google_exceptions.PermissionDenied) as e:
+                    # 401 or 403 - Auth issues
+                    print(f"[CRITICAL] API 认证失败 (Token: {token_name}): {e}")
+                    # db_session will be closed in finally block
+                    raise AIServiceException(f"API 密钥无效或无权访问模型: {str(e)}", "auth_error")
 
-            except Exception as e:
-                # Unknown error
-                print(f"[ERROR] 模型 {model_name} 调用发生未知错误: {e}")
-                db_session.close()
-                last_error = e
-                break
+                except Exception as e:
+                    # Unknown error
+                    print(f"[ERROR] 模型 {model_name} 调用发生未知错误: {e}")
+                    last_error = e
+                    break
 
-        # If we got here, all attempts failed
-        error_msg = f"Model generation failed for {category}. Last error: {str(last_error)}"
-        
-        # Parse specific errors for the user UI
-        last_error_str = str(last_error).lower()
-        retry_seconds = None
-        
-        # Try to parse 'retry_delay { seconds: X }'
-        retry_match = re.search(r'retry_delay\s*\{\s*seconds:\s*(\d+)\s*\}', str(last_error))
-        if retry_match:
-            retry_seconds = int(retry_match.group(1))
+            # If we got here, all attempts failed
+            error_msg = f"Model generation failed for {category}. Last error: {str(last_error)}"
+            
+            # Parse specific errors for the user UI
+            last_error_str = str(last_error).lower()
+            retry_seconds = None
+            
+            # Try to parse 'retry_delay { seconds: X }'
+            retry_match = re.search(r'retry_delay\s*\{\s*seconds:\s*(\d+)\s*\}', str(last_error))
+            if retry_match:
+                retry_seconds = int(retry_match.group(1))
 
-        if isinstance(last_error, google_exceptions.ResourceExhausted):
-            self._log_system_error(category, f"Rate Limit Exceeded (429): {str(last_error)}", {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
-            raise AIServiceException("AI Model Rate Limit Exceeded", "rate_limit", retry_seconds)
+            if isinstance(last_error, google_exceptions.ResourceExhausted):
+                self._log_system_error(category, f"Rate Limit Exceeded (429): {str(last_error)}", {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
+                raise AIServiceException("AI Model Rate Limit Exceeded", "rate_limit", retry_seconds)
+                
+            elif isinstance(last_error, (google_exceptions.Unauthenticated, google_exceptions.PermissionDenied)):
+                self._log_system_error(category, f"Authentication Error: {str(last_error)}", {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
+                raise AIServiceException("AI Model Authentication Failed", "auth_error")
+                
+            elif isinstance(last_error, (google_exceptions.ServiceUnavailable, google_exceptions.DeadlineExceeded, google_exceptions.InternalServerError)):
+                self._log_system_error(category, f"Service Unavailable: {str(last_error)}", {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
+                raise AIServiceException("AI Model Service Unavailable", "service_error")
+                
+            self._log_system_error(category, error_msg, {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
+            raise last_error or Exception(error_msg)
             
-        elif isinstance(last_error, (google_exceptions.Unauthenticated, google_exceptions.PermissionDenied)):
-            self._log_system_error(category, f"Authentication Error: {str(last_error)}", {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
-            raise AIServiceException("AI Model Authentication Failed", "auth_error")
-            
-        elif isinstance(last_error, (google_exceptions.ServiceUnavailable, google_exceptions.DeadlineExceeded, google_exceptions.InternalServerError)):
-            self._log_system_error(category, f"Service Unavailable: {str(last_error)}", {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
-            raise AIServiceException("AI Model Service Unavailable", "service_error")
-            
-        self._log_system_error(category, error_msg, {"primary": model_name, "fallback": None, "traceback": traceback.format_exc() if last_error else None})
-        raise last_error or Exception(error_msg)
+        finally:
+            # Ensure db_session is always closed
+            if db_session:
+                try:
+                    db_session.close()
+                except Exception as e:
+                    print(f"[DB] Error closing db_session in finally block: {e}")
 
 
     def _load_reference_context(self) -> str:
@@ -549,11 +598,14 @@ class AIService:
             self._log_system_error("utility", f"generate_variation Failed: {str(e)}", {"traceback": traceback.format_exc()})
             return {"problems": [], "error": str(e)}
 
-    async def analyze_solution(self, problem_latex: str, standard_solution: str, solution_image_path: str, target_id: int = None):
+    async def analyze_solution(self, problem_latex: str, standard_solution: str, solution_image_path: str, target_id: int = None, user_id: int = None):
         """
         Analyzes a student's handwritten solution against the problem and standard solution.
         Uses TEACHING models (high reasoning capability).
         """
+        start_time = time.time()
+        used_model = "unknown"
+        
         prompt = f"""
         # Role
         你是一位资深的高中数学阅卷专家。请根据提供的标准答案，对学生上传的解答截图进行严格批改。
@@ -600,6 +652,15 @@ class AIService:
             
             # Log success
             self._log_api_call("TEACHING", "GRADE_SOLUTION", used_model, used_token, target_id=target_id)
+            
+            # Log operation
+            cost_time_ms = (time.time() - start_time) * 1000
+            operation_details = {
+                "model_used": used_model,
+                "problem_id": target_id,
+                "cost_time_ms": round(cost_time_ms, 2)
+            }
+            self._log_operation("单题智能批阅", "success", operation_details, user_id=user_id)
                 
             return {
                 "feedback_json": data,
@@ -611,6 +672,17 @@ class AIService:
         except Exception as e:
             print(f"Error analyzing solution: {e}")
             self._log_system_error("teaching", f"Solution Analysis Failed: {str(e)}", {"traceback": traceback.format_exc()})
+            
+            # Log operation failure
+            cost_time_ms = (time.time() - start_time) * 1000
+            operation_details = {
+                "model_used": used_model,
+                "problem_id": target_id,
+                "cost_time_ms": round(cost_time_ms, 2),
+                "error": str(e)
+            }
+            self._log_operation("单题智能批阅", "failed", operation_details, user_id=user_id)
+            
             return {
                 "score": 0,
                 "logic_gaps": [],
@@ -666,11 +738,14 @@ class AIService:
             self._log_system_error("teaching", f"generate_diagnostic_report Failed: {str(e)}", {"traceback": traceback.format_exc()})
             return f"生成诊断报告失败: {str(e)}"
 
-    async def grade_full_paper(self, paper_snapshot: List[Dict[str, Any]], image_paths: List[str], session_id: int = None) -> Dict[str, Any]:
+    async def grade_full_paper(self, paper_snapshot: List[Dict[str, Any]], image_paths: List[str], session_id: int = None, user_id: int = None, exam_type: str = None, exam_mode: str = None, weight_applied: float = 1.0) -> Dict[str, Any]:
         """
         [NEW] Grades a full exam paper by sending all answer images + original questions to Gemini vision.
         Returns { graded_problems, comprehensive_report, formatting_feedback }
         """
+        start_time = time.time()
+        used_model = "unknown"
+        
         # Build question summary for the prompt
         questions_json = json.dumps(paper_snapshot, ensure_ascii=False, indent=2)
         
@@ -731,12 +806,55 @@ class AIService:
             result = json.loads(text.strip())
             
             self._log_api_call("VISION", "GRADE_FULL_PAPER", used_model, used_token, target_id=session_id)
+            
+            # Log operation
+            cost_time_ms = (time.time() - start_time) * 1000
+            operation_details = {
+                "exam_id": session_id,
+                "exam_type": exam_type or "UNKNOWN",
+                "exam_mode": exam_mode or "UNKNOWN",
+                "model_used": used_model,
+                "weight_applied": weight_applied,
+                "total_problems": len(paper_snapshot),
+                "cost_time_ms": round(cost_time_ms, 2)
+            }
+            self._log_operation("整卷智能批阅", "success", operation_details, user_id=user_id)
+            
             return result
             
         except json.JSONDecodeError as e:
             self._log_system_error("vision", f"grade_full_paper JSON parse failed: {str(e)}", {"raw": text[:500] if 'text' in dir() else "N/A"})
+            
+            # Log operation failure
+            cost_time_ms = (time.time() - start_time) * 1000
+            operation_details = {
+                "exam_id": session_id,
+                "exam_type": exam_type or "UNKNOWN",
+                "exam_mode": exam_mode or "UNKNOWN",
+                "model_used": used_model,
+                "weight_applied": weight_applied,
+                "total_problems": len(paper_snapshot),
+                "cost_time_ms": round(cost_time_ms, 2),
+                "error": f"JSON parse failed: {str(e)}"
+            }
+            self._log_operation("整卷智能批阅", "failed", operation_details, user_id=user_id)
+            
             raise ValueError(f"AI returned invalid JSON: {str(e)}")
         except Exception as e:
             self._log_system_error("vision", f"grade_full_paper Failed: {str(e)}", {"traceback": traceback.format_exc()})
+            
+            # Log operation failure
+            cost_time_ms = (time.time() - start_time) * 1000
+            operation_details = {
+                "exam_id": session_id,
+                "exam_type": exam_type or "UNKNOWN",
+                "exam_mode": exam_mode or "UNKNOWN",
+                "model_used": used_model,
+                "weight_applied": weight_applied,
+                "total_problems": len(paper_snapshot),
+                "cost_time_ms": round(cost_time_ms, 2),
+                "error": str(e)
+            }
+            self._log_operation("整卷智能批阅", "failed", operation_details, user_id=user_id)
             raise
 
