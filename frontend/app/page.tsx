@@ -2,15 +2,15 @@
 
 import { useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { FileUpload } from '@/components/FileUpload';
 import KnowledgeMasteryDashboard from '@/components/KnowledgeMasteryDashboard';
-import Link from 'next/link';
+import { fetchWithAuth } from '@/utils/api';
 
 export default function Home() {
   const router = useRouter();
   const singleFileInputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
 
   // Drag handlers for mini dropzone
   const handleDrag = (e: React.DragEvent) => {
@@ -35,6 +35,51 @@ export default function Home() {
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setUploadedFile(e.target.files[0]);
+    }
+  };
+
+  const openFilePicker = () => {
+    if (!singleFileInputRef.current) return;
+    singleFileInputRef.current.value = '';
+    singleFileInputRef.current.click();
+  };
+
+  const handleQuickUpload = async () => {
+    if (!uploadedFile || isUploading) return;
+
+    setIsUploading(true);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', uploadedFile);
+
+      const response = await fetchWithAuth('/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        let message = '上传失败，请稍后重试';
+        try {
+          const err = await response.json();
+          if (typeof err?.detail === 'string') {
+            message = err.detail;
+          } else if (err?.detail?.message) {
+            message = err.detail.message;
+          }
+        } catch {
+          // ignore parse error and use default message
+        }
+        throw new Error(message);
+      }
+
+      const data = await response.json();
+      setUploadedFile(null);
+      router.push(`/problems/${data.id}`);
+    } catch (error: any) {
+      alert(error?.message || '上传失败，请稍后重试');
+    } finally {
+      setIsUploading(false);
     }
   };
 
@@ -82,7 +127,7 @@ export default function Home() {
                     onDragLeave={handleDrag}
                     onDragOver={handleDrag}
                     onDrop={handleDrop}
-                    onClick={() => singleFileInputRef.current?.click()}
+                    onClick={openFilePicker}
                   >
                     <div className="text-2xl mb-1">📸</div>
                     <p className="text-xs font-medium text-slate-700">拖拽或点击上传</p>
@@ -97,15 +142,20 @@ export default function Home() {
                     </div>
                     <div className="flex gap-2">
                       <button 
-                        onClick={() => setUploadedFile(null)}
+                        onClick={() => {
+                          setUploadedFile(null);
+                          openFilePicker();
+                        }}
                         className="flex-1 px-2 py-1 text-xs bg-white hover:bg-indigo-100 text-indigo-600 rounded border border-indigo-200 transition-colors"
                       >
                         更换文件
                       </button>
                       <button 
+                        onClick={handleQuickUpload}
+                        disabled={isUploading}
                         className="flex-1 px-2 py-1 text-xs bg-indigo-600 hover:bg-indigo-700 text-white rounded transition-colors"
                       >
-                        立即上传
+                        {isUploading ? '上传中...' : '立即上传'}
                       </button>
                     </div>
                   </div>
