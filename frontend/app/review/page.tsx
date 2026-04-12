@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { fetchWithAuth } from '@/utils/api';
+import { fetchWithAuth, resolveImageUrl } from '@/utils/api';
 import { motion, AnimatePresence } from 'framer-motion';
 import { LatexRenderer } from '@/components/LatexRenderer';
 import { CheckCircle2, Circle, HelpCircle, XCircle, ChevronRight, Loader2, ArrowRight } from 'lucide-react';
@@ -17,6 +17,10 @@ interface ReviewItem {
     ai_analysis: any;
     trigger_variant: boolean;
     mastery_level: number;
+    original_id?: number;
+    image_path?: string;
+    is_variant?: boolean;
+    variant_loading?: boolean;
 }
 
 export default function ReviewPage() {
@@ -58,25 +62,25 @@ export default function ReviewPage() {
     const handleMasterySubmit = async (level: number) => {
         if (!items[currentIndex]) return;
         setUpdating(true);
-        const problemId = items[currentIndex].id;
-        
+        const problemId = items[currentIndex].original_id || items[currentIndex].id;
+
         try {
             const res = await fetchWithAuth(`/api/reviews/problems/${problemId}/mastery`, {
                 method: 'POST',
                 body: JSON.stringify({ mastery_level: level })
             });
-            
+
             if (res.ok) {
                 // Update local list
                 const newItems = [...items];
                 newItems[currentIndex].mastery_level = level;
                 setItems(newItems);
-                
+
                 // Auto jump to next unassessed
-                const nextUnassessed = newItems.findIndex((item, idx) => 
+                const nextUnassessed = newItems.findIndex((item, idx) =>
                     idx > currentIndex && (!item.mastery_level || item.mastery_level === 0)
                 );
-                
+
                 if (nextUnassessed !== -1) {
                     setTimeout(() => {
                         setCurrentIndex(nextUnassessed);
@@ -102,22 +106,76 @@ export default function ReviewPage() {
         }
     };
 
+    const handleGenerateVariant = async (index: number) => {
+        const item = items[index];
+        if (item.variant_loading || item.is_variant) return;
+
+        // Set loading state
+        const newItems = [...items];
+        newItems[index] = { ...item, variant_loading: true };
+        setItems(newItems);
+
+        try {
+            const originalId = item.original_id || item.id;
+            const res = await fetchWithAuth(`/api/problems/${originalId}/similar`, {
+                method: 'POST'
+            });
+
+            if (res.ok) {
+                const variants = await res.json();
+                if (variants && variants.length > 0) {
+                    const variant = variants[0];
+                    const nextItems = [...items];
+                    nextItems[index] = {
+                        ...nextItems[index],
+                        original_id: originalId,
+                        id: variant.id,
+                        latex_content: variant.latex_content,
+                        ai_analysis: variant.ai_analysis,
+                        is_variant: true,
+                        variant_loading: false
+                    };
+                    setItems(nextItems);
+                    return;
+                }
+            }
+            alert('生成变式失败，请重试');
+        } catch (err) {
+            console.error('Error generating variant', err);
+            alert('网络错误');
+        } finally {
+            setItems(prevItems => {
+                const updated = [...prevItems];
+                // Only reset loading if we didn't succeed and replace the object entirely
+                if (!updated[index].is_variant) {
+                    updated[index] = { ...updated[index], variant_loading: false };
+                }
+                return updated;
+            });
+        }
+    };
+
     const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         if (!e.target.files || e.target.files.length === 0 || !items[currentIndex]) return;
-        
+
         const file = e.target.files[0];
-        const problemId = items[currentIndex].id;
-        
+        const item = items[currentIndex];
+        const problemId = item.id;
+
         const formData = new FormData();
         formData.append('file', file);
-        
+
         setUploading(true);
         try {
-            const res = await fetchWithAuth(`/api/reviews/0/problems/${problemId}/submit_homework`, {
+            const endpoint = item.is_variant
+                ? `/api/practice-problems/${problemId}/submit_solution`
+                : `/api/reviews/0/problems/${problemId}/submit_homework`;
+
+            const res = await fetchWithAuth(endpoint, {
                 method: 'POST',
                 body: formData
             });
-            
+
             if (res.ok) {
                 const data = await res.json();
                 setReports(prev => ({ ...prev, [problemId]: data }));
@@ -141,7 +199,7 @@ export default function ReviewPage() {
     };
 
     const getMasteryIcon = (level: number) => {
-        switch(level) {
+        switch (level) {
             case 1: return <XCircle className="w-5 h-5 text-rose-500 bg-rose-50 rounded-full" />;
             case 2: return <HelpCircle className="w-5 h-5 text-amber-500 bg-amber-50 rounded-full" />;
             case 3: return <CheckCircle2 className="w-5 h-5 text-emerald-500 bg-emerald-50 rounded-full" />;
@@ -224,11 +282,10 @@ export default function ReviewPage() {
                                                 第 {index + 1} 题
                                             </span>
                                             {item.mastery_level > 0 && (
-                                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider ${
-                                                    item.mastery_level === 1 ? 'bg-rose-100 text-rose-700' :
+                                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider ${item.mastery_level === 1 ? 'bg-rose-100 text-rose-700' :
                                                     item.mastery_level === 2 ? 'bg-amber-100 text-amber-700' :
-                                                    'bg-emerald-100 text-emerald-700'
-                                                }`}>
+                                                        'bg-emerald-100 text-emerald-700'
+                                                    }`}>
                                                     {item.mastery_level === 1 ? '完全不会' : item.mastery_level === 2 ? '半知半解' : '完全掌握'}
                                                 </span>
                                             )}
@@ -273,10 +330,23 @@ export default function ReviewPage() {
                                     ID: {currentItem.id}
                                 </span>
                             </div>
-                            
-                            {currentItem.trigger_variant && (
-                                <div className="px-4 py-2 bg-amber-100 text-amber-700 rounded-lg text-sm font-bold flex items-center gap-2 shadow-sm border border-amber-200">
-                                    🌟 触发变式提示：该题知识点较熟练，挑战变式！
+
+                            {!currentItem.is_variant && (
+                                <button
+                                    onClick={() => handleGenerateVariant(currentIndex)}
+                                    disabled={currentItem.variant_loading}
+                                    className="px-4 py-2 bg-indigo-100 text-indigo-700 hover:bg-indigo-200 rounded-lg text-sm font-bold flex items-center gap-2 shadow-sm border border-indigo-200 transition-colors disabled:opacity-50"
+                                >
+                                    {currentItem.variant_loading ? (
+                                        <><Loader2 className="w-4 h-4 animate-spin" /> 生成中...</>
+                                    ) : (
+                                        <>✨ 点击生成专属变式新题</>
+                                    )}
+                                </button>
+                            )}
+                            {currentItem.is_variant && (
+                                <div className="px-4 py-2 bg-emerald-100 text-emerald-700 rounded-lg text-sm font-bold flex items-center gap-2 shadow-sm border border-emerald-200">
+                                    🎯 已为你生成专属变式题
                                 </div>
                             )}
                         </div>
@@ -289,11 +359,20 @@ export default function ReviewPage() {
                             className="bg-white rounded-[2rem] shadow-sm border border-slate-200 p-8 md:p-12 mb-8 relative overflow-hidden"
                         >
                             <div className="text-xs font-black uppercase tracking-widest text-slate-400 mb-6 flex items-center gap-2">
-                                <div className="w-1.5 h-1.5 rounded-full bg-slate-400"></div> 题目原题
+                                <div className="w-1.5 h-1.5 rounded-full bg-slate-400"></div> {currentItem.is_variant ? '智能变式试题' : '题目原题'}
                             </div>
                             <div className="text-xl md:text-2xl leading-relaxed text-slate-800">
                                 <LatexRenderer content={currentItem.latex_content} block />
                             </div>
+
+                            {currentItem.image_path && (
+                                <div className="mt-8 pt-6 border-t border-slate-100 flex justify-center">
+                                    <div className="relative group">
+                                        <div className="text-xs font-black uppercase tracking-widest text-slate-400 mb-3 text-center">题目原图截取参考</div>
+                                        <img src={resolveImageUrl(currentItem.image_path)} alt="Original Reference" className="max-w-full max-h-[300px] object-contain rounded-xl shadow-sm border border-slate-200 group-hover:shadow-md transition-shadow" />
+                                    </div>
+                                </div>
+                            )}
                         </motion.div>
 
                         {/* Homework Upload and Report Area */}
@@ -319,7 +398,7 @@ export default function ReviewPage() {
                                     </label>
                                 </div>
                             </div>
-                            
+
                             {/* AI Grading Report Card */}
                             {reports[currentItem.id] && (
                                 <motion.div
@@ -333,7 +412,7 @@ export default function ReviewPage() {
                                             {reports[currentItem.id].ai_score?.toFixed(0) || 0} <span className="text-sm text-indigo-400">分</span>
                                         </div>
                                     </div>
-                                    
+
                                     <div className="space-y-4">
                                         {reports[currentItem.id].formatting_feedback && (
                                             <div className="bg-white rounded-xl p-4 border border-indigo-50 shadow-sm">
@@ -341,7 +420,7 @@ export default function ReviewPage() {
                                                 <p className="text-sm text-slate-700 leading-relaxed">{reports[currentItem.id].formatting_feedback}</p>
                                             </div>
                                         )}
-                                        
+
                                         {reports[currentItem.id].ai_evaluation?.logic_gaps && reports[currentItem.id].ai_evaluation.logic_gaps.length > 0 && (
                                             <div className="bg-white rounded-xl p-4 border border-rose-50 shadow-sm">
                                                 <h5 className="text-xs font-black text-rose-500 uppercase mb-2">逻辑漏洞</h5>
@@ -352,7 +431,7 @@ export default function ReviewPage() {
                                                 </ul>
                                             </div>
                                         )}
-                                        
+
                                         {reports[currentItem.id].ai_evaluation?.calculation_errors && reports[currentItem.id].ai_evaluation.calculation_errors.length > 0 && (
                                             <div className="bg-white rounded-xl p-4 border border-amber-50 shadow-sm">
                                                 <h5 className="text-xs font-black text-amber-500 uppercase mb-2">计算错误</h5>
@@ -445,7 +524,7 @@ export default function ReviewPage() {
                     </div>
                 </div>
             </div>
-            
+
             <style jsx global>{`
                 pre {
                     font-family: 'STIX Two Text', serif;

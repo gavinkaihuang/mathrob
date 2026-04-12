@@ -2100,6 +2100,7 @@ def get_today_reviews(db: Session = Depends(get_db), current_user: User = Depend
                     item = {
                         "id": p.id,
                         "latex_content": p.latex_content or "",
+                        "image_path": get_accessible_image_url(p.image_path),
                         "difficulty": p.difficulty or 0,
                         "knowledge_path": p.knowledge_path or "unknown",
                         "knowledge_node_name": node_name,
@@ -2152,6 +2153,7 @@ def get_today_reviews(db: Session = Depends(get_db), current_user: User = Depend
         item = {
             "id": p.id,
             "latex_content": p.latex_content or "",
+            "image_path": get_accessible_image_url(p.image_path),
             "difficulty": p.difficulty or 0,
             "knowledge_path": p.knowledge_path or "unknown",
             "knowledge_node_name": node_name,
