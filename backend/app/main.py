@@ -59,6 +59,10 @@ app.include_router(upload.router, prefix="/api") # or just /upload if preferred,
 app.include_router(settings.router, prefix="/api")
 app.include_router(logs.router, prefix="/api")
 
+# 知识点大纲服务 (Taxonomy Service) — 供 MathQBank 等外部系统调用
+from .api.v1.endpoints.taxonomy import router as taxonomy_router
+app.include_router(taxonomy_router, prefix="/api/v1/taxonomy")
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to MathRob AI Learning System"}
